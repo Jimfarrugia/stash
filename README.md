@@ -30,8 +30,8 @@ without cutting safety.
 7. Describe a feature, invoke `/factory-intake`, or ask for `/factory-status`.
 
 The coordinator, workers, and reviewer default to
-`openai/gpt-5.6-luna#high`. Their Markdown definitions can be changed
-independently.
+`openai/gpt-6-astra#medium`. Their Markdown definitions can be changed
+independently; the worker launcher must use the same worker model.
 
 ## Using the factory
 
