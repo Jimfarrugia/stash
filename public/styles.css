@@ -1,0 +1,44 @@
+:root {
+  color: #18202b;
+  background: #f5f7fa;
+  font: 16px/1.5 system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+.shell { width: min(100% - 2rem, 52rem); margin: 0 auto; padding: 3rem 0; }
+.page-header { display: flex; justify-content: space-between; gap: 2rem; align-items: end; margin-bottom: 2rem; }
+.eyebrow, .help, .optional, .data-location, time, .count { color: #536172; font-size: .9rem; }
+.eyebrow { margin: 0; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+h1, h2, h3 { line-height: 1.2; }
+h1 { margin: .25rem 0; font-size: clamp(2.2rem, 8vw, 4rem); }
+h2 { margin-top: 0; }
+.intro { margin: .5rem 0 0; max-width: 35rem; }
+.data-location { max-width: 18rem; margin: 0; overflow-wrap: anywhere; }
+code { font-family: ui-monospace, monospace; }
+.panel { padding: 1.5rem; background: white; border: 1px solid #d7dee8; border-radius: .75rem; box-shadow: 0 4px 18px #1c355308; margin-bottom: 2.5rem; }
+form { display: grid; grid-template-columns: 1fr 1fr auto; align-items: end; gap: 1rem; }
+.field { min-width: 0; }
+label { display: block; font-weight: 700; margin-bottom: .35rem; }
+input { width: 100%; min-height: 2.75rem; border: 1px solid #8795a8; border-radius: .35rem; padding: .55rem .7rem; font: inherit; color: inherit; }
+input:focus-visible, button:focus-visible, a:focus-visible, .status:focus-visible { outline: 3px solid #e6a400; outline-offset: 2px; }
+.help { margin: .35rem 0 0; }
+button { min-height: 2.75rem; border: 0; border-radius: .35rem; padding: .55rem 1rem; background: #1457a6; color: white; font: inherit; font-weight: 700; cursor: pointer; }
+button:hover { background: #0d4381; }
+button:disabled { cursor: wait; opacity: .65; }
+.status { min-height: 1.5rem; margin: 1rem 0 0; }
+.status.error { color: #a52626; font-weight: 700; }
+.list-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.bookmark-list { display: grid; gap: .75rem; }
+.bookmark { padding: 1rem 1.1rem; background: white; border: 1px solid #d7dee8; border-radius: .5rem; }
+.bookmark h3 { margin: 0 0 .25rem; overflow-wrap: anywhere; }
+.bookmark a { display: block; overflow-wrap: anywhere; color: #1457a6; }
+.bookmark time { display: block; margin-top: .5rem; }
+.empty { color: #536172; }
+@media (max-width: 42rem) {
+  .shell { padding: 1.5rem 0; }
+  .page-header { display: block; }
+  .data-location { margin-top: 1rem; }
+  form { grid-template-columns: 1fr; gap: .75rem; }
+  button { width: 100%; }
+}

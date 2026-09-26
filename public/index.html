@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Stash — local bookmarks</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">Local-first bookmark manager</p>
+          <h1>Stash</h1>
+          <p class="intro">Save links on this computer. Stash never fetches the pages you save.</p>
+        </div>
+        <p class="data-location">Data location: <code id="data-location">Loading…</code></p>
+      </header>
+
+      <section class="panel" aria-labelledby="save-heading">
+        <h2 id="save-heading">Save a bookmark</h2>
+        <form id="save-form">
+          <div class="field">
+            <label for="url">URL</label>
+            <input id="url" name="url" type="url" inputmode="url" autocomplete="url" required aria-describedby="url-help">
+            <p id="url-help" class="help">Use an HTTP or HTTPS address.</p>
+          </div>
+          <div class="field">
+            <label for="title">Title <span class="optional">(optional)</span></label>
+            <input id="title" name="title" type="text" maxlength="500" autocomplete="off">
+          </div>
+          <button type="submit">Save bookmark</button>
+        </form>
+        <p id="status" class="status" role="status" aria-live="polite" tabindex="-1"></p>
+      </section>
+
+      <section aria-labelledby="list-heading">
+        <div class="list-heading">
+          <h2 id="list-heading">Active bookmarks</h2>
+          <span id="count" class="count"></span>
+        </div>
+        <div id="bookmark-list" class="bookmark-list" aria-live="polite">
+          <p class="empty">Loading bookmarks…</p>
+        </div>
+      </section>
+    </main>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
