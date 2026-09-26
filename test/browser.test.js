@@ -60,9 +60,15 @@ test('saves, lists, validates, identifies duplicates, and survives a restart', a
   await expect(page.getByText('No bookmarks yet.')).toBeVisible();
   await expect(page.getByText(/Data location:/)).toBeVisible();
 
-  await page.getByLabel('URL').fill('https://example.com/keyboard?one=1#part');
-  await page.getByLabel(/Title/).fill('');
-  await page.getByRole('button', { name: 'Save bookmark' }).press('Enter');
+  await page.keyboard.press('Tab');
+  const urlInput = page.getByLabel('URL');
+  await expect(urlInput).toBeFocused();
+  assert.equal(await urlInput.evaluate((element) => element.matches(':focus-visible')), true);
+  await page.keyboard.type('https://example.com/keyboard?one=1#part');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: 'Save bookmark' })).toBeFocused();
+  await page.keyboard.press('Enter');
   await expect(page.getByText('Saved: https://example.com/keyboard?one=1#part')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'https://example.com/keyboard?one=1#part' })).toBeVisible();
 
@@ -91,6 +97,6 @@ test('saves, lists, validates, identifies duplicates, and survives a restart', a
   await expect(page.getByRole('heading', { name: '<img src=x onerror=alert(1)>' })).toBeVisible();
 
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
-  await page.getByLabel('URL').focus();
+  await page.keyboard.press('Tab');
   assert.equal(await page.getByLabel('URL').evaluate((element) => document.activeElement === element), true);
 });

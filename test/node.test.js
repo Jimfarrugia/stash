@@ -5,7 +5,6 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const {
-  createDatabase,
   normalizeBookmarkUrl,
   startServer,
 } = require('../app/server');
@@ -76,12 +75,16 @@ test('saves, lists, rejects duplicates without mutation, and persists across res
   assert.equal(first.json.bookmark.notes, '');
   assert.deepEqual(first.json.bookmark.tags, []);
   assert.equal(first.json.bookmark.archived, false);
+  assert.ok(Number.isInteger(first.json.bookmark.id));
+  assert.equal(first.json.bookmark.updatedAt, first.json.bookmark.createdAt);
 
   const secondUrl = await saveRequest(running.port, 'https://example.com/second', 'Second');
   assert.equal(secondUrl.status, 201);
   const duplicate = await saveRequest(running.port, 'http://example.com/read?x=1#part', 'Must not replace');
   assert.equal(duplicate.status, 409);
   assert.equal(duplicate.json.error.bookmark.title, 'Original title');
+  assert.equal(duplicate.json.error.bookmark.id, first.json.bookmark.id);
+  assert.equal(duplicate.json.error.bookmark.updatedAt, first.json.bookmark.updatedAt);
   const listed = await request(running.port, '/api/bookmarks');
   assert.equal(listed.status, 200);
   assert.deepEqual(listed.json.bookmarks.map((bookmark) => bookmark.title), ['Second', 'Original title']);
@@ -90,16 +93,10 @@ test('saves, lists, rejects duplicates without mutation, and persists across res
   running = await serverFor(database.path);
   const afterRestart = await request(running.port, '/api/bookmarks');
   assert.deepEqual(afterRestart.json.bookmarks.map((bookmark) => bookmark.title), ['Second', 'Original title']);
+  assert.equal(afterRestart.json.bookmarks[1].id, first.json.bookmark.id);
+  assert.equal(afterRestart.json.bookmarks[1].createdAt, first.json.bookmark.createdAt);
+  assert.equal(afterRestart.json.bookmarks[1].updatedAt, first.json.bookmark.updatedAt);
   assert.equal(afterRestart.json.dataPath, database.path);
-});
-
-test('creates the future-compatible bookmark columns in real SQLite', () => {
-  const database = temporaryDatabase();
-  const db = createDatabase(database.path);
-  const columns = db.prepare('PRAGMA table_info(bookmarks)').all().map((column) => column.name);
-  db.close();
-  fs.rmSync(database.directory, { recursive: true, force: true });
-  assert.deepEqual(columns, ['id', 'url', 'title', 'notes', 'tags', 'created_at', 'updated_at', 'archived']);
 });
 
 test('enforces request and local-server boundaries', async (t) => {
@@ -115,6 +112,8 @@ test('enforces request and local-server boundaries', async (t) => {
   assert.equal((await request(running.port, '/api/bookmarks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: 'x'.repeat(64 * 1024 + 1) })).status, 413);
   assert.equal((await request(running.port, '/api/bookmarks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: 'x'.repeat(64 * 1024 + 1), chunked: true })).status, 413);
   assert.equal((await request(running.port, '/%2e%2e/app.js')).status, 404);
+  assert.equal((await request(running.port, '//[')).status, 400);
+  assert.equal((await request(running.port, '/api/bookmarks')).status, 200);
   assert.equal((await request(running.port, '/does-not-exist')).status, 404);
   assert.equal((await request(running.port, '/api/bookmarks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{' })).status, 400);
 

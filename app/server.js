@@ -164,7 +164,7 @@ function originIsAllowed(origin, hostHeader, port) {
 function createServer(options = {}) {
   const file = databasePath(options);
   const db = createDatabase(file);
-  const server = http.createServer(async (request, response) => {
+  async function handleRequest(request, response) {
     const port = server.address()?.port || options.port || 3000;
     if (!hostIsAllowed(request.headers.host, port)) {
       json(response, 400, { error: { code: 'invalid_host', message: 'Use the local Stash address.' } });
@@ -176,7 +176,13 @@ function createServer(options = {}) {
       json(response, 404, { error: { code: 'not_found', message: 'Not found.' } });
       return;
     }
-    const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+    let pathname;
+    try {
+      pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+    } catch {
+      json(response, 400, { error: { code: 'invalid_request', message: 'Invalid request target.' } });
+      return;
+    }
     const isWrite = request.method === 'POST';
     if (isWrite && !originIsAllowed(request.headers.origin, request.headers.host, port)) {
       json(response, 403, { error: { code: 'invalid_origin', message: 'Cross-origin writes are not allowed.' } });
@@ -233,6 +239,15 @@ function createServer(options = {}) {
     const content = fs.readFileSync(path.join(PUBLIC, asset[0]));
     response.writeHead(200, { 'Content-Type': asset[1], 'Content-Length': content.length, 'X-Content-Type-Options': 'nosniff' });
     response.end(content);
+  }
+  const server = http.createServer((request, response) => {
+    handleRequest(request, response).catch(() => {
+      if (response.headersSent || response.destroyed) {
+        response.destroy();
+        return;
+      }
+      json(response, 500, { error: { code: 'internal_error', message: 'Stash could not complete the request.' } });
+    });
   });
   server.on('close', () => db.close());
   server.stash = { db, file };
