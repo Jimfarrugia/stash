@@ -1,0 +1,19 @@
+{
+  "name": "stash",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local-first bookmark manager",
+  "type": "commonjs",
+  "engines": {
+    "node": "22.16.0"
+  },
+  "scripts": {
+    "start": "node --experimental-sqlite app/server.js",
+    "test:node": "node --experimental-sqlite --test test/node.test.js",
+    "test:browser": "node --experimental-sqlite node_modules/@playwright/test/cli.js test test/browser.test.js",
+    "test": "npm run test:node && npm run test:browser"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

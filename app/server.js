@@ -1,0 +1,305 @@
+const http = require('node:http');
+const os = require('node:os');
+const path = require('node:path');
+const fs = require('node:fs');
+const { DatabaseSync } = require('node:sqlite');
+
+const ROOT = path.join(__dirname, '..');
+const PUBLIC = path.join(ROOT, 'public');
+const MAX_BODY_BYTES = 64 * 1024;
+const MAX_URL_LENGTH = 8192;
+const MAX_TITLE_LENGTH = 500;
+
+function defaultDataDirectory() {
+  if (process.env.STASH_DATA_DIR) return path.resolve(process.env.STASH_DATA_DIR);
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'stash');
+  }
+  if (process.platform === 'win32') {
+    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'stash');
+  }
+  return path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'stash');
+}
+
+function databasePath(options = {}) {
+  if (options.dbPath) return path.resolve(options.dbPath);
+  if (process.env.STASH_DB_PATH) return path.resolve(process.env.STASH_DB_PATH);
+  return path.join(options.dataDir ? path.resolve(options.dataDir) : defaultDataDirectory(), 'stash.sqlite');
+}
+
+function normalizeBookmarkUrl(value) {
+  if (typeof value !== 'string') throw new Error('URL is required.');
+  const input = value.trim();
+  if (!input || input.length > MAX_URL_LENGTH) throw new Error('Enter an HTTP(S) URL.');
+  let url;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new Error('Enter a valid HTTP(S) URL.');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('Only HTTP(S) URLs can be saved.');
+  }
+  return url.href;
+}
+
+function createDatabase(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const db = new DatabaseSync(file);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS bookmarks (
+      id INTEGER PRIMARY KEY,
+      url TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      tags TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1))
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS bookmarks_created_at ON bookmarks (created_at DESC, id DESC);
+  `);
+  return db;
+}
+
+function bookmarkFromRow(row) {
+  return {
+    id: row.id,
+    url: row.url,
+    title: row.title,
+    notes: row.notes,
+    tags: JSON.parse(row.tags),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    archived: Boolean(row.archived),
+  };
+}
+
+function listBookmarks(db) {
+  return db.prepare('SELECT * FROM bookmarks WHERE archived = 0 ORDER BY created_at DESC, id DESC').all().map(bookmarkFromRow);
+}
+
+function saveBookmark(db, input) {
+  const url = normalizeBookmarkUrl(input.url);
+  const rawTitle = typeof input.title === 'string' ? input.title.trim() : '';
+  if (rawTitle.length > MAX_TITLE_LENGTH) throw new Error('Title is too long.');
+  const title = rawTitle || url;
+  const existing = db.prepare('SELECT * FROM bookmarks WHERE url = ?').get(url);
+  if (existing) return { duplicate: true, bookmark: bookmarkFromRow(existing) };
+
+  const now = new Date().toISOString();
+  try {
+    const result = db.prepare(`
+      INSERT INTO bookmarks (url, title, created_at, updated_at)
+      VALUES (?, ?, ?, ?)
+    `).run(url, title, now, now);
+    const created = db.prepare('SELECT * FROM bookmarks WHERE id = ?').get(Number(result.lastInsertRowid));
+    return { duplicate: false, bookmark: bookmarkFromRow(created) };
+  } catch (error) {
+    if (String(error.message).includes('UNIQUE constraint failed')) {
+      const conflict = db.prepare('SELECT * FROM bookmarks WHERE url = ?').get(url);
+      return { duplicate: true, bookmark: bookmarkFromRow(conflict) };
+    }
+    throw error;
+  }
+}
+
+function json(response, status, body) {
+  const payload = JSON.stringify(body);
+  response.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(payload),
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  response.end(payload);
+}
+
+function readBody(request) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    let tooLarge = false;
+    request.on('data', (chunk) => {
+      if (tooLarge) return;
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        tooLarge = true;
+        reject(Object.assign(new Error('Request body is too large.'), { status: 413 }));
+        request.resume();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on('end', () => {
+      if (!tooLarge) resolve(Buffer.concat(chunks).toString('utf8'));
+    });
+    request.on('error', reject);
+  });
+}
+
+function hostIsAllowed(hostHeader, port) {
+  if (typeof hostHeader !== 'string' || hostHeader.length > 255) return false;
+  try {
+    const parsed = new URL(`http://${hostHeader}`);
+    return !parsed.username && !parsed.password &&
+      (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost') &&
+      Number(parsed.port || 80) === port;
+  } catch {
+    return false;
+  }
+}
+
+function originIsAllowed(origin, hostHeader, port) {
+  if (!origin) return true;
+  try {
+    const parsed = new URL(origin);
+    if (parsed.protocol !== 'http:' || parsed.pathname !== '/' || parsed.search || parsed.hash) return false;
+    return hostIsAllowed(parsed.host, port) && parsed.host === hostHeader;
+  } catch {
+    return false;
+  }
+}
+
+function createServer(options = {}) {
+  const file = databasePath(options);
+  const db = createDatabase(file);
+  async function handleRequest(request, response) {
+    const port = server.address()?.port || options.port || 3000;
+    if (!hostIsAllowed(request.headers.host, port)) {
+      json(response, 400, { error: { code: 'invalid_host', message: 'Use the local Stash address.' } });
+      return;
+    }
+
+    const rawPath = String(request.url || '').split(/[?#]/, 1)[0];
+    if (rawPath.includes('..') || /%2e|%2f|%5c/i.test(rawPath)) {
+      json(response, 404, { error: { code: 'not_found', message: 'Not found.' } });
+      return;
+    }
+    let pathname;
+    try {
+      pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+    } catch {
+      json(response, 400, { error: { code: 'invalid_request', message: 'Invalid request target.' } });
+      return;
+    }
+    const isWrite = request.method === 'POST';
+    if (isWrite && !originIsAllowed(request.headers.origin, request.headers.host, port)) {
+      json(response, 403, { error: { code: 'invalid_origin', message: 'Cross-origin writes are not allowed.' } });
+      return;
+    }
+
+    if (request.method === 'GET' && pathname === '/api/bookmarks') {
+      json(response, 200, { bookmarks: listBookmarks(db), dataPath: file });
+      return;
+    }
+
+    if (request.method === 'POST' && pathname === '/api/bookmarks') {
+      if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+        json(response, 415, { error: { code: 'unsupported_media_type', message: 'Send JSON.' } });
+        return;
+      }
+      if (Number(request.headers['content-length']) > MAX_BODY_BYTES) {
+        request.resume();
+        json(response, 413, { error: { code: 'request_too_large', message: 'Request body is too large.' } });
+        return;
+      }
+      try {
+        const body = JSON.parse(await readBody(request));
+        const saved = saveBookmark(db, body || {});
+        if (saved.duplicate) {
+          json(response, 409, { error: { code: 'duplicate', message: 'That URL is already saved.', bookmark: saved.bookmark } });
+          return;
+        }
+        json(response, 201, { bookmark: saved.bookmark });
+      } catch (error) {
+        const status = error.status || (error instanceof SyntaxError ? 400 : 422);
+        const code = status === 413 ? 'request_too_large' : 'invalid_bookmark';
+        json(response, status, { error: { code, message: error.message || 'Could not save bookmark.' } });
+      }
+      return;
+    }
+
+    if (request.method !== 'GET') {
+      json(response, 405, { error: { code: 'method_not_allowed', message: 'Method not allowed.' } });
+      return;
+    }
+
+    const assets = {
+      '/': ['index.html', 'text/html; charset=utf-8'],
+      '/index.html': ['index.html', 'text/html; charset=utf-8'],
+      '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
+      '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
+    };
+    const asset = assets[pathname];
+    if (!asset) {
+      json(response, 404, { error: { code: 'not_found', message: 'Not found.' } });
+      return;
+    }
+    const content = fs.readFileSync(path.join(PUBLIC, asset[0]));
+    response.writeHead(200, { 'Content-Type': asset[1], 'Content-Length': content.length, 'X-Content-Type-Options': 'nosniff' });
+    response.end(content);
+  }
+  const server = http.createServer((request, response) => {
+    handleRequest(request, response).catch(() => {
+      if (response.headersSent || response.destroyed) {
+        response.destroy();
+        return;
+      }
+      json(response, 500, { error: { code: 'internal_error', message: 'Stash could not complete the request.' } });
+    });
+  });
+  server.on('close', () => db.close());
+  server.stash = { db, file };
+  return server;
+}
+
+function startServer(options = {}) {
+  const host = options.host || '127.0.0.1';
+  const port = options.port ?? (process.env.PORT === undefined ? 3000 : Number(process.env.PORT));
+  return new Promise((resolve, reject) => {
+    if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
+      reject(new Error('Stash can only bind to loopback.'));
+      return;
+    }
+    let server;
+    try {
+      server = createServer(options);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const onError = (error) => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      resolve(server);
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, host);
+  });
+}
+
+if (require.main === module) {
+  startServer().then((server) => {
+    const { port } = server.address();
+    console.log(`Stash running at http://127.0.0.1:${port}/`);
+    console.log(`Data location: ${server.stash.file}`);
+  }).catch((error) => {
+    console.error(`Stash could not start: ${error.message}`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  MAX_BODY_BYTES,
+  createDatabase,
+  createServer,
+  databasePath,
+  normalizeBookmarkUrl,
+  saveBookmark,
+  startServer,
+};
