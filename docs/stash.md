@@ -38,6 +38,7 @@ npx playwright install chromium   # once, if Chromium is not already available
 npm run test:node
 npm run test:browser
 npm test
+npm run benchmark:search
 ```
 
 The browser checks use Playwright as a development-only dependency. They run
@@ -64,10 +65,45 @@ overwrites or restores a conflicting bookmark.
 unchanged. Confirming removes it permanently: there is no trash or in-app undo.
 All maintenance works offline and persists across server restarts.
 
+### Find and organize
+
+Search splits input on whitespace. Every term must occur as a literal,
+case-insensitive substring of a bookmark's title, URL, notes, or tag name;
+there is no fuzzy matching or query syntax, and `%` and `_` are ordinary text.
+Select one or more tags to require all of them (AND). Search, selected tags, and
+the Active, Archived, or All view combine. Clear filters restores the default
+Active view and newest-saved order. Sort options are newest saved (the default),
+oldest saved, recently updated, and title; ties have deterministic ID
+tie-breaking. Empty results explain that the filters can be cleared.
+
+The collection has no record-count cap. A repeatable 10,000-bookmark benchmark
+is included as `npm run benchmark:search`; it creates and removes a temporary
+fixture, warms each request once, then measures ten HTTP responses for title,
+notes, tag/archive, literal wildcard, and no-result queries. The documented
+target is under 500 ms for every response. On the benchmark machine used for
+this release (AMD Ryzen 7 5700X, 16 logical cores, Linux x64, Node.js 22.16.0),
+the run on 2026-09-27 produced:
+
+| Query | Average | Maximum |
+| --- | ---: | ---: |
+| title term | 24.02 ms | 40.65 ms |
+| notes term | 22.11 ms | 23.89 ms |
+| tag AND archive | 4.87 ms | 5.18 ms |
+| literal wildcard | 22.21 ms | 22.83 ms |
+| no results | 22.13 ms | 23.39 ms |
+
+The measurements include the loopback HTTP request, response serialization, and
+client-side response read. They do not impose a collection-size limit.
+
 ## API and schema contract
 
 `GET /api/bookmarks` returns `{ bookmarks, dataPath }` for active bookmarks,
-newest saved first. `POST /api/bookmarks` accepts JSON `{ url, title }` and
+newest saved first. It accepts `view=active|archived|all`, `q=<literal search>`,
+repeated `tag=<label>` parameters, and `sort=newest|oldest|updated|title`.
+Search terms are whitespace-separated and must each match a title, URL, notes,
+or tag name; tags are case-insensitive AND filters. Search is implemented as
+literal matching, so SQL wildcard characters and punctuation are not syntax.
+Invalid views or sort names return 422. `POST /api/bookmarks` accepts JSON `{ url, title }` and
 returns `{ bookmark }` with status 201. Blank titles use the normalized URL.
 HTTP(S) URLs are trimmed and normalized with the standard `URL` implementation;
 query parameters and fragments remain part of identity. Duplicate normalized
@@ -115,3 +151,6 @@ database: older versions do not implement this mutation safeguard.
 Requests are bounded, host-checked, and protected against cross-origin writes;
 static serving exposes only the known application assets. User text is rendered
 as text, not markup. Saved links are ordinary user-activated links only.
+
+JSON backup/merge and browser-bookmark HTML import/export remain planned and are
+not part of the search/filter release.

@@ -35,15 +35,40 @@
       </section>
 
       <section aria-labelledby="list-heading">
+        <form id="filter-form" class="panel" aria-label="Find bookmarks">
+          <div class="field">
+            <label for="search">Search bookmarks</label>
+            <input id="search" type="search" aria-describedby="search-help">
+            <p id="search-help" class="help">Every word must match title, URL, notes or tags. Case is ignored; punctuation is literal.</p>
+          </div>
+          <button type="submit">Search</button>
+          <div class="field">
         <label for="view">View</label>
         <select id="view">
           <option value="active">Active</option>
           <option value="archived">Archived</option>
           <option value="all">All</option>
         </select>
+          </div>
+          <div class="field">
+            <label for="sort">Sort</label>
+            <select id="sort">
+              <option value="newest">Newest saved</option>
+              <option value="oldest">Oldest saved</option>
+              <option value="updated">Recently updated</option>
+              <option value="title">Title</option>
+            </select>
+          </div>
+          <fieldset>
+            <legend>Filter by tags</legend>
+            <p class="help">Matches every selected tag, together with search and view.</p>
+            <div id="filter-tags"><p>No tags yet.</p></div>
+          </fieldset>
+          <button type="button" id="clear-filters">Clear filters</button>
+        </form>
         <div class="list-heading">
           <h2 id="list-heading">Active bookmarks</h2>
-          <span id="count" class="count"></span>
+          <span id="count" class="count" aria-live="polite" aria-atomic="true"></span>
         </div>
         <div id="bookmark-list" class="bookmark-list" aria-live="polite">
           <p class="empty">Loading bookmarks…</p>
