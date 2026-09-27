@@ -9,6 +9,8 @@ const editForm = document.querySelector('#edit-form');
 const editStatus = document.querySelector('#edit-status');
 const tagInput = document.querySelector('#tag-input');
 let editingId;
+let editingIdentity;
+let editorVersion = 0;
 let editingTags = [];
 let bookmarks = [];
 let loadVersion = 0;
@@ -134,7 +136,7 @@ async function writeBookmark(id, method, body) {
     method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   const result = await response.json();
-  if (response.status === 409) throw new Error(conflictMessage(result.error.bookmark));
+  if (response.status === 409 && result.error.bookmark) throw new Error(conflictMessage(result.error.bookmark));
   if (!response.ok) throw new Error(result.error?.message || 'Could not update bookmark.');
   return result;
 }
@@ -144,7 +146,7 @@ async function actOnBookmark(bookmark, action, button) {
   button.disabled = true;
   try {
     await writeBookmark(bookmark.id, action === 'Delete permanently' ? 'DELETE' : 'PATCH',
-      action === 'Delete permanently' ? { confirmed: true } : { archived: !bookmark.archived });
+      action === 'Delete permanently' ? { identity: bookmark.identity, confirmed: true } : { identity: bookmark.identity, archived: !bookmark.archived });
     await loadBookmarks();
     setStatus(`${action === 'Delete permanently' ? 'Deleted' : action === 'Archive' ? 'Archived' : 'Restored'}: ${bookmark.title}`);
     focusBookmark(bookmark.id);
@@ -181,11 +183,14 @@ function addTag() {
 }
 
 async function openEditor(bookmark) {
+  const version = ++editorVersion;
   editingId = bookmark.id;
+  editingIdentity = bookmark.identity;
   for (const field of ['url', 'title', 'notes']) editForm.elements[field].value = bookmark[field];
   editingTags = [...bookmark.tags];
   tagInput.value = '';
   editStatus.textContent = '';
+  editForm.querySelector('[type="submit"]').disabled = false;
   renderEditingTags();
   const suggestions = document.querySelector('#tag-suggestions');
   suggestions.replaceChildren();
@@ -194,13 +199,16 @@ async function openEditor(bookmark) {
   try {
     const response = await fetch('/api/tags');
     const result = await response.json();
+    if (version !== editorVersion || !editor.open) return;
     if (!response.ok) throw new Error('Could not load tag suggestions.');
     for (const tag of result.tags) {
       const option = document.createElement('option');
       option.value = tag;
       suggestions.append(option);
     }
-  } catch (error) { editStatus.textContent = error.message; }
+  } catch (error) {
+    if (version === editorVersion && editor.open) editStatus.textContent = error.message;
+  }
 }
 
 document.querySelector('#add-tag').addEventListener('click', () => { addTag(); tagInput.focus(); });
@@ -208,24 +216,35 @@ tagInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') { event.preventDefault(); addTag(); }
 });
 document.querySelector('#cancel-edit').addEventListener('click', () => editor.close());
-editor.addEventListener('close', () => focusBookmark(editingId));
+editor.addEventListener('close', () => {
+  if (!editor.open) {
+    editorVersion++;
+    focusBookmark(editingId);
+  }
+});
 editForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  const version = editorVersion;
   addTag();
   const button = editForm.querySelector('[type="submit"]');
   button.disabled = true;
   try {
     const result = await writeBookmark(editingId, 'PATCH', {
+      identity: editingIdentity,
       url: editForm.elements.url.value, title: editForm.elements.title.value,
       notes: editForm.elements.notes.value, tags: editingTags,
     });
     await loadBookmarks();
-    editor.close();
+    if (version === editorVersion && editor.open) editor.close();
     setStatus(`Updated: ${result.bookmark.title}`);
   } catch (error) {
-    editStatus.textContent = error.message;
-    editStatus.focus();
-  } finally { button.disabled = false; }
+    if (version === editorVersion && editor.open) {
+      editStatus.textContent = error.message;
+      editStatus.focus();
+    } else setStatus(error.message, true);
+  } finally {
+    if (version === editorVersion && editor.open) button.disabled = false;
+  }
 });
 view.addEventListener('change', loadBookmarks);
 

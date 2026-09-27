@@ -50,6 +50,85 @@ test.afterAll(async () => {
   fs.rmSync(database, { recursive: true, force: true });
 });
 
+test('stale browser edit, archive and deletion cannot mutate a replacement bookmark', async ({ page, request }) => {
+  const created = await request.post(`${running.baseURL}/api/bookmarks`, { data: { url: 'https://example.com/stale-a', title: 'Stale A' } });
+  const a = (await created.json()).bookmark;
+  await page.goto(`${running.baseURL}/`);
+  const stale = page.locator('article').filter({ has: page.getByRole('heading', { name: 'Stale A', exact: true }) });
+  await expect(stale).toBeVisible();
+  expect((await request.delete(`${running.baseURL}/api/bookmarks/${a.id}`, { data: { identity: a.identity, confirmed: true } })).ok()).toBe(true);
+  const replacement = await request.post(`${running.baseURL}/api/bookmarks`, { data: { url: 'https://example.com/replacement-b', title: 'Replacement B' } });
+  const b = (await replacement.json()).bookmark;
+  expect(b.id).toBe(a.id);
+  expect(b.identity).not.toBe(a.identity);
+  const assertUnchanged = async () => {
+    const result = await request.get(`${running.baseURL}/api/bookmarks?view=all`);
+    expect((await result.json()).bookmarks.find((bookmark) => bookmark.id === b.id)).toEqual(b);
+  };
+  try {
+    await stale.getByRole('button', { name: 'Edit', exact: true }).click();
+    const editor = page.getByRole('dialog', { name: 'Edit bookmark' });
+    await editor.getByLabel('Title', { exact: true }).fill('Wrong record');
+    await editor.getByRole('button', { name: 'Save changes' }).click();
+    await expect(editor.getByRole('alert')).toContainText('Reload');
+    await assertUnchanged();
+    await page.keyboard.press('Escape');
+    await stale.getByRole('button', { name: 'Archive', exact: true }).click();
+    await expect(page.getByRole('status')).toContainText('Reload');
+    await assertUnchanged();
+    page.once('dialog', (dialog) => dialog.accept());
+    const deletion = page.waitForResponse((response) => response.request().method() === 'DELETE');
+    await stale.getByRole('button', { name: 'Delete permanently' }).click();
+    expect((await deletion).status()).toBe(409);
+    await assertUnchanged();
+  } finally {
+    await request.delete(`${running.baseURL}/api/bookmarks/${b.id}`, { data: { identity: b.identity, confirmed: true } });
+  }
+});
+
+test('an old save completion leaves a newer editor draft and focus intact', async ({ page, request }) => {
+  const records = [];
+  for (const title of ['Pending A', 'Draft B']) {
+    const result = await request.post(`${running.baseURL}/api/bookmarks`, { data: { url: `https://example.com/${title.replace(' ', '-')}`, title } });
+    records.push((await result.json()).bookmark);
+  }
+  let release;
+  let intercepted;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { intercepted = resolve; });
+  await page.route(`**/api/bookmarks/${records[0].id}`, async (route) => {
+    const response = await route.fetch();
+    intercepted();
+    await gate;
+    await route.fulfill({ response });
+  });
+  try {
+    await page.goto(`${running.baseURL}/`);
+    await page.locator('article').filter({ hasText: 'Pending A' }).getByRole('button', { name: 'Edit', exact: true }).click();
+    const editor = page.getByRole('dialog', { name: 'Edit bookmark' });
+    await editor.getByLabel('Title', { exact: true }).fill('Saved A');
+    await editor.getByRole('button', { name: 'Save changes' }).click();
+    await started;
+    await page.keyboard.press('Escape');
+    await page.locator('article').filter({ hasText: 'Draft B' }).getByRole('button', { name: 'Edit', exact: true }).click();
+    await editor.getByLabel('Notes').fill('Unsaved B draft');
+    await expect(editor.getByRole('button', { name: 'Save changes' })).toBeEnabled();
+    release();
+    await expect(page.getByRole('status')).toHaveText('Updated: Saved A');
+    await expect(editor).toBeVisible();
+    await expect(editor.getByLabel('Notes')).toHaveValue('Unsaved B draft');
+    await expect(editor.getByLabel('Notes')).toBeFocused();
+    await expect(editor.getByRole('button', { name: 'Save changes' })).toBeEnabled();
+    await editor.getByRole('button', { name: 'Save changes' }).click();
+    await expect(editor).not.toBeVisible();
+    const result = await request.get(`${running.baseURL}/api/bookmarks`);
+    expect((await result.json()).bookmarks.find((bookmark) => bookmark.id === records[1].id).notes).toBe('Unsaved B draft');
+  } finally {
+    release();
+    for (const bookmark of records) await request.delete(`${running.baseURL}/api/bookmarks/${bookmark.id}`, { data: { identity: bookmark.identity, confirmed: true } });
+  }
+});
+
 test('a delayed older view response cannot replace the selected view', async ({ page }) => {
   await page.goto(`${running.baseURL}/`);
   await expect(page.getByRole('heading', { name: 'Active bookmarks' })).toBeVisible();

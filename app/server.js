@@ -3,6 +3,7 @@ const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
 const { DatabaseSync } = require('node:sqlite');
+const { randomUUID } = require('node:crypto');
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -59,12 +60,27 @@ function createDatabase(file) {
     ) STRICT;
     CREATE INDEX IF NOT EXISTS bookmarks_created_at ON bookmarks (created_at DESC, id DESC);
   `);
+  // Migrate in one transaction: old clients without tokens must reload before writing.
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (!db.prepare('PRAGMA table_info(bookmarks)').all().some((column) => column.name === 'identity')) {
+      db.exec("ALTER TABLE bookmarks ADD COLUMN identity TEXT NOT NULL DEFAULT ''");
+      const assign = db.prepare('UPDATE bookmarks SET identity = ? WHERE id = ?');
+      for (const row of db.prepare('SELECT id FROM bookmarks').all()) assign.run(randomUUID(), row.id);
+    }
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS bookmarks_identity ON bookmarks (identity); COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    db.close();
+    throw error;
+  }
   return db;
 }
 
 function bookmarkFromRow(row) {
   return {
     id: row.id,
+    identity: row.identity,
     url: row.url,
     title: row.title,
     notes: row.notes,
@@ -91,9 +107,9 @@ function saveBookmark(db, input) {
   const now = new Date().toISOString();
   try {
     const result = db.prepare(`
-      INSERT INTO bookmarks (url, title, created_at, updated_at)
-      VALUES (?, ?, ?, ?)
-    `).run(url, title, now, now);
+      INSERT INTO bookmarks (url, title, created_at, updated_at, identity)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(url, title, now, now, randomUUID());
     const created = db.prepare('SELECT * FROM bookmarks WHERE id = ?').get(Number(result.lastInsertRowid));
     return { duplicate: false, bookmark: bookmarkFromRow(created) };
   } catch (error) {
@@ -110,10 +126,18 @@ function existingTags(db) {
     .flatMap((row) => JSON.parse(row.tags)))].sort();
 }
 
-function editBookmark(db, id, input) {
+function mutationTarget(db, id, input) {
   const row = db.prepare('SELECT * FROM bookmarks WHERE id = ?').get(id);
   if (!row) throw Object.assign(new Error('Bookmark not found.'), { status: 404 });
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Send a bookmark object.');
+  if (!input.identity || input.identity !== row.identity) {
+    throw Object.assign(new Error('Bookmark identity changed or is missing. Reload before making changes.'), { status: 409, code: 'stale_bookmark' });
+  }
+  return row;
+}
+
+function editBookmark(db, id, input) {
+  const row = mutationTarget(db, id, input);
   const current = bookmarkFromRow(row);
   const url = input.url === undefined ? current.url : normalizeBookmarkUrl(input.url);
   if (input.title !== undefined && typeof input.title !== 'string') throw new Error('Title must be text.');
@@ -129,8 +153,9 @@ function editBookmark(db, id, input) {
   const conflict = db.prepare('SELECT * FROM bookmarks WHERE url = ? AND id != ?').get(url, id);
   if (conflict) return { duplicate: true, bookmark: bookmarkFromRow(conflict) };
   const updatedAt = new Date(Math.max(Date.now(), Date.parse(current.updatedAt) + 1)).toISOString();
-  db.prepare('UPDATE bookmarks SET url = ?, title = ?, notes = ?, tags = ?, archived = ?, updated_at = ? WHERE id = ?')
-    .run(url, rawTitle || url, notes, JSON.stringify(tags), Number(archived), updatedAt, id);
+  const changed = db.prepare('UPDATE bookmarks SET url = ?, title = ?, notes = ?, tags = ?, archived = ?, updated_at = ? WHERE id = ? AND identity = ?')
+    .run(url, rawTitle || url, notes, JSON.stringify(tags), Number(archived), updatedAt, id, input.identity);
+  if (!changed.changes) throw Object.assign(new Error('Bookmark not found.'), { status: 404 });
   return { bookmark: bookmarkFromRow(db.prepare('SELECT * FROM bookmarks WHERE id = ?').get(id)) };
 }
 
@@ -249,7 +274,8 @@ function createServer(options = {}) {
         const body = JSON.parse(await readBody(request));
         if (request.method === 'DELETE') {
           if (body?.confirmed !== true) throw new Error('Confirm permanent deletion. There is no undo.');
-          const result = db.prepare('DELETE FROM bookmarks WHERE id = ?').run(Number(record[1]));
+          mutationTarget(db, Number(record[1]), body);
+          const result = db.prepare('DELETE FROM bookmarks WHERE id = ? AND identity = ?').run(Number(record[1]), body.identity);
           if (!result.changes) throw Object.assign(new Error('Bookmark not found.'), { status: 404 });
           json(response, 200, { deleted: true });
           return;
@@ -262,7 +288,7 @@ function createServer(options = {}) {
         json(response, record ? 200 : 201, { bookmark: saved.bookmark });
       } catch (error) {
         const status = error.status || (error instanceof SyntaxError ? 400 : 422);
-        const code = status === 413 ? 'request_too_large' : 'invalid_bookmark';
+        const code = error.code || (status === 413 ? 'request_too_large' : 'invalid_bookmark');
         json(response, status, { error: { code, message: error.message || 'Could not save bookmark.' } });
       }
       return;

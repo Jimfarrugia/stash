@@ -8,6 +8,12 @@ across restarts. Edit URLs, titles, plain-text notes and flat tags; archive and
 restore bookmarks; or permanently delete them after confirmation. Active is the
 default view, with Archived and All available.
 
+When upgrading an existing installation, restart Stash and reload open tabs.
+The database automatically gains immutable bookmark identities so stale tabs
+cannot modify a replacement bookmark after deletion. See the
+[API and migration notes](docs/stash.md#api-and-schema-contract) for API-client
+requirements.
+
 ## Quick start
 
 Use **Node.js 22.16.0**, the exact supported runtime. Stash uses Node's built-in
