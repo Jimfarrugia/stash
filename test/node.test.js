@@ -185,6 +185,164 @@ function saveRequest(port, url, title, extra = {}) {
   });
 }
 
+function backupRequest(port, action, backup, token, extra = {}) {
+  return request(port, `/api/backup/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(token ? { 'X-Stash-Preview': token } : {}), ...extra.headers },
+    body: typeof backup === 'string' ? backup : JSON.stringify(backup),
+    chunked: extra.chunked,
+  });
+}
+
+test('JSON export ignores filters and preview/confirmed merge round-trips bookmark content', async (t) => {
+  const databases = [temporaryDatabase(), temporaryDatabase()];
+  const [source, target] = await Promise.all(databases.map((db) => serverFor(db.path)));
+  t.after(async () => {
+    await Promise.all([close(source.server), close(target.server)]);
+    for (const db of databases) fs.rmSync(db.directory, { recursive: true, force: true });
+  });
+  const saved = (await saveRequest(source.port, 'https://example.com/backup', 'Backup')).json.bookmark;
+  const edited = (await change(source.port, saved.id, { identity: saved.identity, notes: '<script>inert</script>\nNotes', tags: ['one', 'two'], archived: true })).json.bookmark;
+  await saveRequest(source.port, 'https://example.com/active', 'Active');
+  const exported = await request(source.port, '/api/backup?view=active&q=missing');
+  assert.equal(exported.status, 200);
+  assert.match(exported.headers['content-disposition'], /attachment/);
+  assert.equal(exported.json.format, 'stash');
+  assert.equal(exported.json.version, 1);
+  assert.equal(exported.json.bookmarks.length, 2);
+  assert.deepEqual(exported.json.bookmarks.find((b) => b.url === edited.url), {
+    url: edited.url, title: 'Backup', notes: '<script>inert</script>\nNotes', tags: ['one', 'two'],
+    archived: true, createdAt: edited.createdAt, updatedAt: edited.updatedAt,
+  });
+  const preview = await backupRequest(target.port, 'preview', exported.text);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.json.add, 2);
+  assert.equal(preview.json.skip, 0);
+  assert.deepEqual((await request(target.port, '/api/bookmarks?view=all')).json.bookmarks, []);
+  assert.equal((await backupRequest(target.port, 'confirm', exported.text)).status, 409);
+  const confirmed = await backupRequest(target.port, 'confirm', exported.text, preview.json.token);
+  assert.equal(confirmed.status, 200);
+  assert.equal(confirmed.json.add, 2);
+  assert.deepEqual((await request(target.port, '/api/backup')).json, exported.json);
+  const imported = (await request(target.port, '/api/bookmarks?view=all')).json.bookmarks;
+  assert.ok(imported.every((bookmark) => bookmark.identity !== saved.identity));
+});
+
+function backupFixture(url = 'https://example.com/imported') {
+  return { url, title: '<img src=x onerror=alert(1)>', notes: 'Plain text\n日本語', tags: ['reading', 'web'],
+    createdAt: '2020-01-02T03:04:05.006Z', updatedAt: '2021-02-03T04:05:06.007Z', archived: true };
+}
+
+test('merge skips normalized duplicates, preserves existing records and rechecks after preview', async (t) => {
+  const database = temporaryDatabase();
+  const running = await serverFor(database.path);
+  t.after(async () => { await close(running.server); fs.rmSync(database.directory, { recursive: true, force: true }); });
+  const saved = (await saveRequest(running.port, 'https://example.com/existing', 'Keep me')).json.bookmark;
+  const existing = (await change(running.port, saved.id, { identity: saved.identity, archived: true })).json.bookmark;
+  const backup = { format: 'stash', version: 1, bookmarks: [
+    backupFixture(existing.url), backupFixture(), backupFixture(' HTTPS://EXAMPLE.com:443/imported '),
+    backupFixture('https://example.com/race'),
+  ] };
+  const preview = await backupRequest(running.port, 'preview', backup);
+  assert.equal(preview.json.add, 2);
+  assert.equal(preview.json.skip, 2);
+  assert.match(preview.json.entries[0].reason, /already in collection/);
+  assert.match(preview.json.entries[2].reason, /in this file/);
+  const race = (await saveRequest(running.port, 'https://example.com/race', 'Created after preview')).json.bookmark;
+  const altered = structuredClone(backup);
+  altered.bookmarks[1].title = 'Changed after preview';
+  assert.equal((await backupRequest(running.port, 'confirm', altered, preview.json.token)).status, 409);
+  const merged = await backupRequest(running.port, 'confirm', backup, preview.json.token);
+  assert.equal(merged.json.add, 1);
+  assert.equal(merged.json.skip, 3);
+  const all = (await request(running.port, '/api/bookmarks?view=all')).json.bookmarks;
+  assert.deepEqual(all.find((b) => b.id === existing.id), existing);
+  assert.deepEqual(all.find((b) => b.id === race.id), race);
+  assert.equal((await backupRequest(running.port, 'confirm', backup, preview.json.token)).json.add, 0);
+});
+
+test('backup media types require application/json while allowing parameters', async (t) => {
+  const database = temporaryDatabase();
+  const running = await serverFor(database.path);
+  t.after(async () => { await close(running.server); fs.rmSync(database.directory, { recursive: true, force: true }); });
+  const backup = { format: 'stash', version: 1, bookmarks: [backupFixture()] };
+  const headers = { 'Content-Type': 'application/json; charset=utf-8' };
+  const preview = await backupRequest(running.port, 'preview', backup, undefined, { headers });
+  assert.equal(preview.status, 200);
+  for (const action of ['preview', 'confirm']) {
+    assert.equal((await backupRequest(running.port, action, backup, preview.json.token,
+      { headers: { 'Content-Type': 'application/jsonfoo' } })).status, 415);
+  }
+  assert.deepEqual((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks, []);
+  assert.equal((await backupRequest(running.port, 'confirm', backup, preview.json.token, { headers })).status, 200);
+});
+
+test('invalid backups and limits reject the whole file, including chunked bodies and commit requests', async (t) => {
+  const database = temporaryDatabase();
+  const running = await serverFor(database.path);
+  t.after(async () => { await close(running.server); fs.rmSync(database.directory, { recursive: true, force: true }); });
+  const valid = { format: 'stash', version: 1, bookmarks: [backupFixture()] };
+  const malformedUtf8 = Buffer.concat([Buffer.from(JSON.stringify(valid).replace('Plain text', 'UTF8_SENTINEL').split('UTF8_SENTINEL')[0]),
+    Buffer.from([0xff]), Buffer.from(JSON.stringify(valid).replace('Plain text', 'UTF8_SENTINEL').split('UTF8_SENTINEL')[1])]);
+  assert.equal((await request(running.port, '/api/backup/preview', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: malformedUtf8,
+  })).status, 422);
+  const invalid = ['{', null, [], {}, { ...valid, version: 2 }, { ...valid, bookmarks: {} }, { ...valid, extra: 1 }];
+  for (const fields of [{ url: 'javascript:alert(1)' }, { url: '/relative' }, { title: null }, { title: '' },
+    { notes: {} }, { tags: ['Mixed Case'] }, { tags: ['same', 'same'] }, { tags: [1] },
+    { archived: 1 }, { createdAt: '2024-02-30T00:00:00.000Z' }, { updatedAt: 'yesterday' }, { extra: true }]) {
+    invalid.push({ ...valid, bookmarks: [backupFixture('https://example.com/valid-first'), { ...backupFixture(), ...fields }] });
+  }
+  invalid.push({ ...valid, bookmarks: Array.from({ length: 10001 }, () => backupFixture()) });
+  for (const backup of invalid) {
+    for (const action of ['preview', 'confirm']) {
+      const result = await backupRequest(running.port, action, backup);
+      assert.ok([400, 422].includes(result.status), JSON.stringify(backup).slice(0, 200));
+    }
+  }
+  const oversized = ' '.repeat(20 * 1024 * 1024 + 1);
+  for (const chunked of [false, true]) {
+    for (const action of ['preview', 'confirm']) {
+      assert.equal((await backupRequest(running.port, action, oversized, undefined, { chunked })).status, 413);
+    }
+  }
+  assert.equal((await backupRequest(running.port, 'preview', valid, undefined, { headers: { Origin: 'http://evil.example' } })).status, 403);
+  assert.deepEqual((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks, []);
+  const validText = JSON.stringify(valid);
+  const exactSize = validText + ' '.repeat(20 * 1024 * 1024 - Buffer.byteLength(validText));
+  const atLimit = await backupRequest(running.port, 'preview', exactSize);
+  assert.equal(atLimit.status, 200);
+  assert.equal(atLimit.json.add, 1);
+  const tenThousand = { ...valid, bookmarks: Array.from({ length: 10000 }, (_, i) => backupFixture(`https://example.com/${i}`)) };
+  const preview = await backupRequest(running.port, 'preview', tenThousand);
+  assert.equal(preview.json.add, 10000);
+  assert.equal((await backupRequest(running.port, 'confirm', tenThousand, preview.json.token)).json.add, 10000);
+  assert.equal((await saveRequest(running.port, 'https://example.com/beyond-import-limit', 'No collection cap')).status, 201);
+  assert.equal((await request(running.port, '/api/backup')).json.bookmarks.length, 10001);
+});
+
+test('an injected SQLite failure rolls back all confirmed additions and allows a retry', async (t) => {
+  const database = temporaryDatabase();
+  let running = await serverFor(database.path);
+  t.after(async () => { await close(running.server); fs.rmSync(database.directory, { recursive: true, force: true }); });
+  const saved = (await saveRequest(running.port, 'https://example.com/keep', 'Keep')).json.bookmark;
+  const backup = { format: 'stash', version: 1, bookmarks: [backupFixture(), backupFixture('https://example.com/fail')] };
+  const preview = await backupRequest(running.port, 'preview', backup);
+  // Real database fault, not an HTTP-accessible test hook; the second insert fails.
+  running.server.stash.db.exec(`CREATE TRIGGER fail_import BEFORE INSERT ON bookmarks
+    WHEN NEW.url = 'https://example.com/fail' BEGIN SELECT RAISE(ABORT, 'injected failure'); END`);
+  const failed = await backupRequest(running.port, 'confirm', backup, preview.json.token);
+  assert.equal(failed.status, 500);
+  assert.match(failed.json.error.message, /no bookmarks were added/);
+  assert.deepEqual((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks, [saved]);
+  running.server.stash.db.exec('DROP TRIGGER fail_import');
+  assert.equal((await backupRequest(running.port, 'confirm', backup, preview.json.token)).json.add, 2);
+  await close(running.server);
+  running = await serverFor(database.path);
+  assert.equal((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks.length, 3);
+  assert.equal((await backupRequest(running.port, 'confirm', backup, preview.json.token)).status, 409);
+});
+
 test('literal search spans fields and combines every term, tag and archive view', async (t) => {
   const database = temporaryDatabase();
   const running = await serverFor(database.path);

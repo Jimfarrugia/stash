@@ -29,6 +29,8 @@ textarea { width: 100%; resize: vertical; }
 dialog { width: min(36rem, calc(100% - 2rem)); max-height: calc(100% - 2rem); overflow: auto; border: 1px solid #8795a8; border-radius: .75rem; }
 dialog::backdrop { background: #18202b88; }
 #edit-form { grid-template-columns: 1fr; }
+#import-form { grid-template-columns: 1fr; }
+#import-entries { max-height: 16rem; overflow: auto; overflow-wrap: anywhere; padding-left: 1.5rem; }
 #filter-form { grid-template-columns: 1fr; }
 #filter-form select { width: 100%; margin: 0; }
 #filter-form fieldset { min-width: 0; border: 1px solid #8795a8; }

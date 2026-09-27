@@ -151,5 +151,92 @@ Requests are bounded, host-checked, and protected against cross-origin writes;
 static serving exposes only the known application assets. User text is rendered
 as text, not markup. Saved links are ordinary user-activated links only.
 
-JSON backup/merge and browser-bookmark HTML import/export remain planned and are
-not part of the search/filter release.
+## JSON backup and merge
+
+Choose **Export JSON backup** to download `stash-backup.json`. Export always
+contains the complete collection, active and archived, regardless of search,
+tags, view or sort. Keep the file private: it contains unencrypted URLs, notes
+and all other bookmark content. Stash does not fetch any exported/imported URL.
+
+Choose a **Stash JSON file**, then **Preview JSON import**. Review the add/skip
+counts and per-entry reasons, then choose **Confirm merge**, or **Cancel** (or
+Escape) to discard the preview without changes. Confirmation adds all eligible
+entries atomically; a database failure rolls back the entire merge. Once
+confirmation is in progress, cancellation is unavailable. A lost connection
+can leave the outcome unknown: check the collection or repeat the merge safely.
+
+Imports only add new normalized HTTP(S) URLs. Existing URLs, including archived
+ones, are skipped without overwriting, updating timestamps or unarchiving the
+record. Within a file, the first occurrence wins and later duplicate URLs are
+skipped. Standard URL normalization trims whitespace and preserves queries and
+fragments. Uniqueness is checked again inside the confirmation transaction, so
+counts can change if another tab edits the collection after preview. There is
+no destructive restore or replacement option.
+
+JSON is the full-fidelity backup format. Browser-bookmark HTML exchange remains
+planned; its portability promise is links and titles, not all Stash fields.
+
+### Version 1 format
+
+UTF-8 JSON, with exactly these top-level properties:
+
+```json
+{
+  "format": "stash",
+  "version": 1,
+  "bookmarks": [
+    {
+      "url": "https://example.com/read?q=1#part",
+      "title": "Reading",
+      "notes": "Plain-text notes",
+      "tags": ["reading", "web"],
+      "createdAt": "2020-01-02T03:04:05.006Z",
+      "updatedAt": "2021-02-03T04:05:06.007Z",
+      "archived": true
+    }
+  ]
+}
+```
+
+All seven bookmark properties are required; unknown properties are rejected.
+URLs must be absolute HTTP(S); titles must be nonblank strings; notes must be
+strings (empty is allowed). Tags must be unique nonempty strings already
+trimmed and lowercase, as exported by Stash. Timestamps must be valid canonical
+UTC ISO strings in JavaScript `Date.toISOString()` form, including milliseconds.
+Archive status must be a JSON boolean. Invalid entries invalidate the entire
+backup, even if their URLs would be skipped. Unsupported versions, invalid
+UTF-8/JSON, missing/wrong fields and invalid dates cause no writes.
+
+Content fields are preserved on import, including timestamps and tag order.
+Local database row IDs and immutable mutation identities are not bookmark
+content and are not exported: every added record gets a local ID and a fresh
+server-issued identity, preventing old tabs from mutating replacement records.
+Existing records keep their IDs and identities. Backups are bounded by the file
+limit rather than editor string limits, so long URL-fallback titles and
+normalized URLs can round-trip without truncation.
+
+Each import is limited to **20 MiB (20,971,520 bytes)** and **10,000 entries**,
+counting duplicates too; exactly those limits are accepted. Both preview and
+confirmation enforce limits, including chunked requests. Collection size and
+export size are uncapped. An export exceeding an import limit must be divided
+into valid version-1 files within those limits before import; never truncate
+the original backup. There is no automatic splitting in this release.
+
+### Backup API
+
+- `GET /api/backup`: downloads the version-1 JSON envelope, ordered by URL.
+  Query/filter parameters are ignored. No-store and attachment headers are set.
+- `POST /api/backup/preview`: send the raw backup as `application/json`. Returns
+  `{ add, skip, entries, token }`. Each entry has a zero-based `index`, `url`,
+  `title`, and `reason` (null for additions, text for skips). No writes occur.
+- `POST /api/backup/confirm`: send the exact same backup text with the returned
+  `X-Stash-Preview` header, after obtaining explicit confirmation. Returns
+  `{ add, skip, entries }` with actual transaction-time counts and reasons.
+  Changed text or missing/invalid tokens return 409. Tokens are bound to the
+  server process; preview again after a restart. They are not authentication
+  credentials. No server-side upload cache or cancellation request is needed.
+
+Malformed JSON returns 400, invalid backup content/versions/entry counts 422,
+oversized requests 413, unsupported media types 415, and rolled-back database
+failures 500. Existing host/origin protections apply. Ordinary bookmark write
+requests retain their 64 KiB limit; only backup endpoints permit 20 MiB.

@@ -34,6 +34,22 @@
         <p id="status" class="status" role="status" aria-live="polite" tabindex="-1"></p>
       </section>
 
+      <section class="panel" aria-labelledby="backup-heading">
+        <h2 id="backup-heading">Backup and merge</h2>
+        <p>JSON is a full-fidelity Stash backup: links, titles, notes, tags, timestamps and archive status. Export includes the entire collection, regardless of filters.</p>
+        <p>Browser HTML exchange is planned for portable links and titles, not full-fidelity backup.</p>
+        <p><a href="/api/backup" download="stash-backup.json">Export JSON backup</a></p>
+        <form id="import-form">
+          <div class="field">
+            <label for="import-file">Stash JSON file</label>
+            <input id="import-file" type="file" accept=".json,application/json" required aria-describedby="import-help">
+            <p class="help" id="import-help">Maximum 20 MiB and 10,000 entries per import. Preview first, then confirm. Merge only: never replace, overwrite or unarchive existing bookmarks.</p>
+          </div>
+          <button type="submit">Preview JSON import</button>
+        </form>
+        <p id="import-status" class="status" role="alert" tabindex="-1"></p>
+      </section>
+
       <section aria-labelledby="list-heading">
         <form id="filter-form" class="panel" aria-label="Find bookmarks">
           <div class="field">
@@ -75,6 +91,14 @@
         </div>
       </section>
     </main>
+    <dialog id="import-preview" aria-labelledby="import-heading" aria-describedby="import-summary">
+      <h2 id="import-heading">Preview JSON merge</h2>
+      <p id="import-summary"></p>
+      <p>Nothing has changed. Confirm to add new URLs only. Counts may change if another tab changes the collection before confirmation.</p>
+      <ul id="import-entries" aria-label="Import entries"></ul>
+      <div class="actions"><button type="button" id="cancel-import" autofocus>Cancel</button><button type="button" id="confirm-import">Confirm merge</button></div>
+      <p id="import-error" class="status" role="alert" tabindex="-1"></p>
+    </dialog>
     <dialog id="editor" aria-labelledby="edit-heading">
       <h2 id="edit-heading">Edit bookmark</h2>
       <form id="edit-form">
