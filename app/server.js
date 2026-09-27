@@ -91,9 +91,29 @@ function bookmarkFromRow(row) {
   };
 }
 
-function listBookmarks(db, view) {
+const SORTS = {
+  newest: (a, b) => compareText(b.createdAt, a.createdAt) || b.id - a.id,
+  oldest: (a, b) => compareText(a.createdAt, b.createdAt) || a.id - b.id,
+  updated: (a, b) => compareText(b.updatedAt, a.updatedAt) || b.id - a.id,
+  title: (a, b) => compareText(a.title.toLowerCase(), b.title.toLowerCase()) || a.id - b.id,
+};
+
+function compareText(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function listBookmarks(db, view, params, sort) {
+  const terms = (params.get('q') || '').toLowerCase().split(/\s+/u).filter(Boolean);
+  const tags = [...new Set(params.getAll('tag').map((tag) => tag.trim().toLowerCase()).filter(Boolean))];
+  // ponytail: linear scan at the measured 10k scale; add a search index if larger
+  // collections exceed the target. includes() keeps SQL wildcards and syntax literal.
   return db.prepare('SELECT * FROM bookmarks WHERE ? = \'all\' OR archived = ? ORDER BY created_at DESC, id DESC')
-    .all(view, Number(view === 'archived')).map(bookmarkFromRow);
+    .all(view, Number(view === 'archived')).map(bookmarkFromRow).filter((bookmark) => {
+      if (!tags.every((tag) => bookmark.tags.includes(tag))) return false;
+      if (!terms.length) return true;
+      const fields = [bookmark.title, bookmark.url, bookmark.notes, ...bookmark.tags].map((field) => field.toLowerCase());
+      return terms.every((term) => fields.some((field) => field.includes(term)));
+    }).sort(SORTS[sort]);
 }
 
 function saveBookmark(db, input) {
@@ -245,12 +265,18 @@ function createServer(options = {}) {
     }
 
     if (request.method === 'GET' && pathname === '/api/bookmarks') {
-      const view = new URL(request.url, `http://${request.headers.host}`).searchParams.get('view') || 'active';
+      const params = new URL(request.url, `http://${request.headers.host}`).searchParams;
+      const view = params.get('view') || 'active';
       if (!['active', 'archived', 'all'].includes(view)) {
         json(response, 422, { error: { code: 'invalid_view', message: 'Choose Active, Archived, or All.' } });
         return;
       }
-      json(response, 200, { bookmarks: listBookmarks(db, view), dataPath: file });
+      const sort = params.get('sort') || 'newest';
+      if (!Object.hasOwn(SORTS, sort)) {
+        json(response, 422, { error: { code: 'invalid_sort', message: 'Choose newest saved, oldest saved, recently updated, or title.' } });
+        return;
+      }
+      json(response, 200, { bookmarks: listBookmarks(db, view, params, sort), dataPath: file });
       return;
     }
 

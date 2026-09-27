@@ -29,6 +29,12 @@ textarea { width: 100%; resize: vertical; }
 dialog { width: min(36rem, calc(100% - 2rem)); max-height: calc(100% - 2rem); overflow: auto; border: 1px solid #8795a8; border-radius: .75rem; }
 dialog::backdrop { background: #18202b88; }
 #edit-form { grid-template-columns: 1fr; }
+#filter-form { grid-template-columns: 1fr; }
+#filter-form select { width: 100%; margin: 0; }
+#filter-form fieldset { min-width: 0; border: 1px solid #8795a8; }
+#filter-tags { max-height: 12rem; overflow: auto; padding: .25rem; }
+#filter-tags label { display: flex; align-items: center; gap: .5rem; overflow-wrap: anywhere; }
+#filter-tags input { width: 1.25rem; flex-shrink: 0; }
 #edit-tags { padding: 0; list-style: none; }
 #edit-tags li { overflow-wrap: anywhere; margin-top: .5rem; }
 .actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }

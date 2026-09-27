@@ -50,6 +50,65 @@ test.afterAll(async () => {
   fs.rmSync(database, { recursive: true, force: true });
 });
 
+test('finds literal terms with AND tags, views and sorts using narrow keyboard controls', async ({ page, request }) => {
+  const records = [];
+  for (const [slug, title, tags, archived] of [
+    ['needle', 'Zulu 100% a_b', ['reading', 'web tools'], false],
+    ['other', 'Alpha 100x axb', ['reading'], false],
+    ['archived', 'Archived 100% a_b', ['reading', 'web tools'], true],
+  ]) {
+    const created = await request.post(`${running.baseURL}/api/bookmarks`, { data: { url: `https://example.com/${slug}`, title } });
+    const bookmark = (await created.json()).bookmark;
+    records.push(bookmark);
+    await request.patch(`${running.baseURL}/api/bookmarks/${bookmark.id}`, { data: { identity: bookmark.identity, notes: 'Éclair notes', tags, archived } });
+  }
+  try {
+    await page.goto(`${running.baseURL}/`);
+    const titles = page.locator('article h3');
+    await expect(titles).toHaveText(['Alpha 100x axb', 'Zulu 100% a_b']);
+    await page.getByLabel('Sort', { exact: true }).selectOption('oldest');
+    await expect(titles).toHaveText(['Zulu 100% a_b', 'Alpha 100x axb']);
+    await page.getByLabel('Sort', { exact: true }).selectOption('title');
+    await expect(titles).toHaveText(['Alpha 100x axb', 'Zulu 100% a_b']);
+    await page.getByLabel('Sort', { exact: true }).selectOption('updated');
+    await expect(titles).toHaveText(['Alpha 100x axb', 'Zulu 100% a_b']);
+    const search = page.getByLabel('Search bookmarks', { exact: true });
+    for (const query of ['%', '_', 'ÉCLAIR NEEDLE reading', 'Zulu']) {
+      await search.fill(query);
+      await search.press('Enter');
+      await expect(titles).toHaveText(['Zulu 100% a_b']);
+    }
+    await search.fill('éclair');
+    await search.press('Enter');
+    await expect(titles).toHaveCount(2);
+    await page.getByRole('checkbox', { name: 'reading', exact: true }).check();
+    const web = page.getByRole('checkbox', { name: 'web tools', exact: true });
+    await web.focus();
+    await page.keyboard.press('Space');
+    await expect(titles).toHaveText(['Zulu 100% a_b']);
+    await expect(web).toBeFocused();
+    await page.getByLabel('View', { exact: true }).selectOption('archived');
+    await expect(titles).toHaveText(['Archived 100% a_b']);
+    await page.getByLabel('View', { exact: true }).selectOption('all');
+    await expect(titles).toHaveText(['Archived 100% a_b', 'Zulu 100% a_b']);
+    await search.fill('missing');
+    await search.press('Enter');
+    await expect(page.getByText('No bookmarks match these filters. Clear filters to start again.')).toBeVisible();
+    await expect(page.locator('#count')).toContainText('0 bookmarks');
+    await page.getByRole('button', { name: 'Clear filters', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    await expect(search).toBeFocused();
+    await expect(search).toHaveValue('');
+    await expect(web).not.toBeChecked();
+    await expect(page.getByLabel('View', { exact: true })).toHaveValue('active');
+    await expect(page.getByLabel('Sort', { exact: true })).toHaveValue('newest');
+    await expect(titles).toHaveText(['Alpha 100x axb', 'Zulu 100% a_b']);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  } finally {
+    for (const bookmark of records) await request.delete(`${running.baseURL}/api/bookmarks/${bookmark.id}`, { data: { identity: bookmark.identity, confirmed: true } });
+  }
+});
+
 test('stale browser edit, archive and deletion cannot mutate a replacement bookmark', async ({ page, request }) => {
   const created = await request.post(`${running.baseURL}/api/bookmarks`, { data: { url: 'https://example.com/stale-a', title: 'Stale A' } });
   const a = (await created.json()).bookmark;

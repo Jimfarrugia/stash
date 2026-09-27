@@ -4,6 +4,11 @@ const count = document.querySelector('#count');
 const status = document.querySelector('#status');
 const dataLocation = document.querySelector('#data-location');
 const view = document.querySelector('#view');
+const filterForm = document.querySelector('#filter-form');
+const search = document.querySelector('#search');
+const sort = document.querySelector('#sort');
+const selectedTags = new Set();
+let tagLabels = [];
 const editor = document.querySelector('#editor');
 const editForm = document.querySelector('#edit-form');
 const editStatus = document.querySelector('#edit-status');
@@ -21,13 +26,13 @@ function setStatus(message, isError = false) {
   status.setAttribute('aria-live', isError ? 'assertive' : 'polite');
 }
 
-function render() {
+function render(filtered) {
   list.replaceChildren();
   count.textContent = `${bookmarks.length} ${bookmarks.length === 1 ? 'bookmark' : 'bookmarks'}`;
   if (!bookmarks.length) {
     const empty = document.createElement('p');
     empty.className = 'empty';
-    empty.textContent = 'No bookmarks yet.';
+    empty.textContent = filtered ? 'No bookmarks match these filters. Clear filters to start again.' : 'No bookmarks yet.';
     list.append(empty);
     return;
   }
@@ -74,23 +79,61 @@ function render() {
 async function loadBookmarks() {
   const version = ++loadVersion;
   const selectedView = view.value;
+  const params = new URLSearchParams({ view: selectedView });
+  if (search.value.trim()) params.set('q', search.value);
+  if (sort.value !== 'newest') params.set('sort', sort.value);
+  for (const tag of selectedTags) params.append('tag', tag);
+  const filtered = selectedView !== 'active' || params.has('q') || selectedTags.size > 0;
+  count.textContent = 'Loading bookmarks…';
   try {
-    const response = await fetch(`/api/bookmarks?view=${selectedView}`);
+    const response = await fetch(`/api/bookmarks?${params}`);
     const result = await response.json();
     if (version !== loadVersion) return;
     if (!response.ok) throw new Error(result.error?.message || 'Could not load bookmarks.');
     bookmarks = result.bookmarks;
     dataLocation.textContent = result.dataPath;
-    render();
+    render(filtered);
     document.querySelector('#list-heading').textContent = `${selectedView[0].toUpperCase()}${selectedView.slice(1)} bookmarks`;
+    await loadFilterTags(version);
   } catch (error) {
     if (version !== loadVersion) return;
     setStatus(error.message, true);
+    count.textContent = 'Results unavailable';
     list.replaceChildren();
     const failure = document.createElement('p');
     failure.className = 'empty';
     failure.textContent = 'Bookmarks could not be loaded.';
     list.append(failure);
+  }
+}
+
+async function loadFilterTags(version) {
+  try {
+    const response = await fetch('/api/tags');
+    if (!response.ok) throw new Error('Could not load tag filters. Reload to try again.');
+    const result = await response.json();
+    if (version !== loadVersion) return;
+    const labels = [...new Set([...result.tags, ...selectedTags])].sort();
+    if (JSON.stringify(labels) === JSON.stringify(tagLabels)) return;
+    tagLabels = labels;
+    const container = document.querySelector('#filter-tags');
+    container.replaceChildren();
+    if (!labels.length) container.textContent = 'No tags yet.';
+    for (const tag of labels) {
+      const label = document.createElement('label');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = selectedTags.has(tag);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) selectedTags.add(tag);
+        else selectedTags.delete(tag);
+        loadBookmarks();
+      });
+      label.append(checkbox, document.createTextNode(tag));
+      container.append(label);
+    }
+  } catch (error) {
+    if (version === loadVersion) setStatus(error.message, true);
   }
 }
 
@@ -247,5 +290,13 @@ editForm.addEventListener('submit', async (event) => {
   }
 });
 view.addEventListener('change', loadBookmarks);
+sort.addEventListener('change', loadBookmarks);
+filterForm.addEventListener('submit', (event) => { event.preventDefault(); loadBookmarks(); });
+document.querySelector('#clear-filters').addEventListener('click', () => {
+  filterForm.reset();
+  selectedTags.clear();
+  loadBookmarks();
+  search.focus();
+});
 
 loadBookmarks();

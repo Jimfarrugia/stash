@@ -6,7 +6,10 @@ and browse your saved bookmarks, newest first. Blank titles use the URL, duplica
 URLs are reported without overwriting existing bookmarks, and saves persist
 across restarts. Edit URLs, titles, plain-text notes and flat tags; archive and
 restore bookmarks; or permanently delete them after confirmation. Active is the
-default view, with Archived and All available.
+default view, with Archived and All available. Search is a case-insensitive
+literal search across title, URL, notes, and tag names; every word must match.
+Selected tags use AND matching, and results can be sorted by newest/oldest saved,
+recently updated, or title.
 
 When upgrading an existing installation, restart Stash and reload open tabs.
 The database automatically gains immutable bookmark identities so stale tabs
@@ -57,7 +60,6 @@ precedence. Stash displays the database location at startup and in the page.
 
 The following features are planned, **not yet implemented**:
 
-- Search, tag filtering, and additional sort options.
 - Full-fidelity JSON backup and merge import.
 - Browser-bookmark HTML import/export for exchanging links and titles.
 

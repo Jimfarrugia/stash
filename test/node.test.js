@@ -185,6 +185,65 @@ function saveRequest(port, url, title, extra = {}) {
   });
 }
 
+test('literal search spans fields and combines every term, tag and archive view', async (t) => {
+  const database = temporaryDatabase();
+  const running = await serverFor(database.path);
+  t.after(async () => {
+    await close(running.server);
+    fs.rmSync(database.directory, { recursive: true, force: true });
+  });
+  const a = (await saveRequest(running.port, 'https://example.com/Needle', 'ÉCLAIR 100% a_b')).json.bookmark;
+  const b = (await saveRequest(running.port, 'https://example.com/other', '100x axb')).json.bookmark;
+  await change(running.port, a.id, { identity: a.identity, notes: 'Back\\slash "quote"', tags: ['Reading', 'Web tools'], archived: true });
+  await change(running.port, b.id, { identity: b.identity, tags: ['Reading'] });
+  const find = async (q, tags = [], view = 'all') => {
+    const params = new URLSearchParams({ q, view });
+    for (const tag of tags) params.append('tag', tag);
+    const response = await request(running.port, `/api/bookmarks?${params}`);
+    assert.equal(response.status, 200);
+    return response.json.bookmarks.map((bookmark) => bookmark.id);
+  };
+  for (const q of ['éclair', 'NEEDLE', 'back\\slash', 'TOOLS', '%', '_', '"quote"', '  éclair\tneedle\nreading tools  ']) {
+    assert.deepEqual(await find(q), [a.id], q);
+  }
+  for (const q of ['éclair missing', 'title:éclair', '"éclair"', "' OR 1=1 --"]) assert.deepEqual(await find(q), []);
+  assert.deepEqual(await find(''), [b.id, a.id]);
+  assert.deepEqual(await find('  \n\t'), [b.id, a.id]);
+  assert.deepEqual(await find('', [' Reading ', 'WEB TOOLS']), [a.id]);
+  assert.deepEqual(await find('', ['read']), []);
+  assert.deepEqual(await find('needle', ['reading', 'web tools'], 'active'), []);
+  assert.deepEqual(await find('needle', ['reading', 'web tools'], 'archived'), [a.id]);
+  assert.deepEqual(await find('needle', ['missing'], 'all'), []);
+});
+
+test('all sorts are deterministic with combined filters and tied timestamps or titles', async (t) => {
+  const database = temporaryDatabase();
+  const running = await serverFor(database.path);
+  t.after(async () => {
+    await close(running.server);
+    fs.rmSync(database.directory, { recursive: true, force: true });
+  });
+  // Fixed timestamps exercise ties without relying on wall-clock timing.
+  const insert = running.server.stash.db.prepare(`INSERT INTO bookmarks
+    (url, title, notes, tags, created_at, updated_at, archived, identity) VALUES (?, ?, 'match', '["one","two"]', ?, ?, ?, ?)`);
+  const early = '2026-01-01T00:00:00.000Z';
+  const late = '2026-02-01T00:00:00.000Z';
+  for (const [id, title, created, updated, archived] of [[1, 'Zulu', early, late, 1], [2, 'alpha', late, early, 1], [3, 'ALPHA', late, early, 1], [4, 'Excluded', early, early, 0]]) {
+    insert.run(`https://example.com/${id}`, title, created, updated, archived, `fixture-${id}`);
+  }
+  for (const [sort, ids] of [['newest', [3, 2, 1]], ['oldest', [1, 2, 3]], ['updated', [1, 3, 2]], ['title', [2, 3, 1]]]) {
+    for (const view of ['all', 'archived', 'active']) {
+      const response = await request(running.port, `/api/bookmarks?view=${view}&q=match&tag=one&tag=two&sort=${sort}`);
+      assert.equal(response.status, 200);
+      const expected = view === 'active' ? [4] : view === 'archived' ? ids : {
+        newest: [3, 2, 4, 1], oldest: [1, 4, 2, 3], updated: [1, 4, 3, 2], title: [2, 3, 4, 1],
+      }[sort];
+      assert.deepEqual(response.json.bookmarks.map((bookmark) => bookmark.id), expected);
+    }
+  }
+  assert.equal((await request(running.port, '/api/bookmarks?sort=invalid')).status, 422);
+});
+
 test('normalizes only HTTP(S) URLs while preserving query and fragment identity', () => {
   assert.equal(normalizeBookmarkUrl('  HTTP://Example.COM:80/read?x=1#part  '), 'http://example.com/read?x=1#part');
   assert.equal(normalizeBookmarkUrl('https://example.com/a?x=1#one'), 'https://example.com/a?x=1#one');
