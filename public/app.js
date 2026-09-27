@@ -3,7 +3,15 @@ const list = document.querySelector('#bookmark-list');
 const count = document.querySelector('#count');
 const status = document.querySelector('#status');
 const dataLocation = document.querySelector('#data-location');
+const view = document.querySelector('#view');
+const editor = document.querySelector('#editor');
+const editForm = document.querySelector('#edit-form');
+const editStatus = document.querySelector('#edit-status');
+const tagInput = document.querySelector('#tag-input');
+let editingId;
+let editingTags = [];
 let bookmarks = [];
+let loadVersion = 0;
 
 function setStatus(message, isError = false) {
   status.textContent = message;
@@ -36,19 +44,45 @@ function render() {
     saved.dateTime = bookmark.createdAt;
     saved.textContent = `Saved ${new Date(bookmark.createdAt).toLocaleString()}`;
     article.append(title, link, saved);
+    const state = document.createElement('p');
+    state.textContent = bookmark.archived ? 'Archived' : 'Active';
+    const notes = document.createElement('p');
+    notes.className = 'notes';
+    notes.textContent = bookmark.notes;
+    const tags = document.createElement('p');
+    tags.className = 'tags';
+    tags.textContent = bookmark.tags.join(' · ');
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    for (const label of ['Edit', bookmark.archived ? 'Restore' : 'Archive', 'Delete permanently']) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.addEventListener('click', () => {
+        if (label === 'Edit') openEditor(bookmark);
+        else actOnBookmark(bookmark, label, button);
+      });
+      actions.append(button);
+    }
+    article.append(state, notes, tags, actions);
     list.append(article);
   }
 }
 
 async function loadBookmarks() {
+  const version = ++loadVersion;
+  const selectedView = view.value;
   try {
-    const response = await fetch('/api/bookmarks');
+    const response = await fetch(`/api/bookmarks?view=${selectedView}`);
     const result = await response.json();
+    if (version !== loadVersion) return;
     if (!response.ok) throw new Error(result.error?.message || 'Could not load bookmarks.');
     bookmarks = result.bookmarks;
     dataLocation.textContent = result.dataPath;
     render();
+    document.querySelector('#list-heading').textContent = `${selectedView[0].toUpperCase()}${selectedView.slice(1)} bookmarks`;
   } catch (error) {
+    if (version !== loadVersion) return;
     setStatus(error.message, true);
     list.replaceChildren();
     const failure = document.createElement('p');
@@ -72,14 +106,11 @@ form.addEventListener('submit', async (event) => {
     const result = await response.json();
     if (response.status === 409) {
       const existing = result.error.bookmark;
-      if (!bookmarks.some((bookmark) => bookmark.id === existing.id)) bookmarks.unshift(existing);
-      render();
-      setStatus(`Already saved: ${existing.title}`);
+      setStatus(conflictMessage(existing));
       return;
     }
     if (!response.ok) throw new Error(result.error?.message || 'Could not save bookmark.');
-    bookmarks.unshift(result.bookmark);
-    render();
+    await loadBookmarks();
     form.reset();
     setStatus(`Saved: ${result.bookmark.title}`);
   } catch (error) {
@@ -88,5 +119,114 @@ form.addEventListener('submit', async (event) => {
     button.disabled = false;
   }
 });
+
+function conflictMessage(bookmark) {
+  return `Already saved: ${bookmark.title}${bookmark.archived ? ' (archived)' : ''} — ${bookmark.url} (ID ${bookmark.id}).`;
+}
+
+function focusBookmark(id) {
+  const button = list.querySelector(`[data-bookmark-id="${id}"] button`);
+  (button || view).focus();
+}
+
+async function writeBookmark(id, method, body) {
+  const response = await fetch(`/api/bookmarks/${id}`, {
+    method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const result = await response.json();
+  if (response.status === 409) throw new Error(conflictMessage(result.error.bookmark));
+  if (!response.ok) throw new Error(result.error?.message || 'Could not update bookmark.');
+  return result;
+}
+
+async function actOnBookmark(bookmark, action, button) {
+  if (action === 'Delete permanently' && !window.confirm(`Permanently delete “${bookmark.title}”? There is no undo or trash.`)) return;
+  button.disabled = true;
+  try {
+    await writeBookmark(bookmark.id, action === 'Delete permanently' ? 'DELETE' : 'PATCH',
+      action === 'Delete permanently' ? { confirmed: true } : { archived: !bookmark.archived });
+    await loadBookmarks();
+    setStatus(`${action === 'Delete permanently' ? 'Deleted' : action === 'Archive' ? 'Archived' : 'Restored'}: ${bookmark.title}`);
+    focusBookmark(bookmark.id);
+  } catch (error) {
+    setStatus(error.message, true);
+    button.disabled = false;
+    button.focus();
+  }
+}
+
+function renderEditingTags() {
+  const tags = document.querySelector('#edit-tags');
+  tags.replaceChildren();
+  for (const tag of editingTags) {
+    const item = document.createElement('li');
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = `Remove tag ${tag}`;
+    remove.addEventListener('click', () => {
+      editingTags = editingTags.filter((value) => value !== tag);
+      renderEditingTags();
+      tagInput.focus();
+    });
+    item.append(remove);
+    tags.append(item);
+  }
+}
+
+function addTag() {
+  const tag = tagInput.value.trim().toLowerCase();
+  if (tag && !editingTags.includes(tag)) editingTags.push(tag);
+  tagInput.value = '';
+  renderEditingTags();
+}
+
+async function openEditor(bookmark) {
+  editingId = bookmark.id;
+  for (const field of ['url', 'title', 'notes']) editForm.elements[field].value = bookmark[field];
+  editingTags = [...bookmark.tags];
+  tagInput.value = '';
+  editStatus.textContent = '';
+  renderEditingTags();
+  const suggestions = document.querySelector('#tag-suggestions');
+  suggestions.replaceChildren();
+  editor.showModal();
+  editForm.elements.url.focus();
+  try {
+    const response = await fetch('/api/tags');
+    const result = await response.json();
+    if (!response.ok) throw new Error('Could not load tag suggestions.');
+    for (const tag of result.tags) {
+      const option = document.createElement('option');
+      option.value = tag;
+      suggestions.append(option);
+    }
+  } catch (error) { editStatus.textContent = error.message; }
+}
+
+document.querySelector('#add-tag').addEventListener('click', () => { addTag(); tagInput.focus(); });
+tagInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') { event.preventDefault(); addTag(); }
+});
+document.querySelector('#cancel-edit').addEventListener('click', () => editor.close());
+editor.addEventListener('close', () => focusBookmark(editingId));
+editForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  addTag();
+  const button = editForm.querySelector('[type="submit"]');
+  button.disabled = true;
+  try {
+    const result = await writeBookmark(editingId, 'PATCH', {
+      url: editForm.elements.url.value, title: editForm.elements.title.value,
+      notes: editForm.elements.notes.value, tags: editingTags,
+    });
+    await loadBookmarks();
+    editor.close();
+    setStatus(`Updated: ${result.bookmark.title}`);
+  } catch (error) {
+    editStatus.textContent = error.message;
+    editStatus.focus();
+  } finally { button.disabled = false; }
+});
+view.addEventListener('change', loadBookmarks);
 
 loadBookmarks();

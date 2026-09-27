@@ -22,6 +22,18 @@ form { display: grid; grid-template-columns: 1fr 1fr auto; align-items: end; gap
 label { display: block; font-weight: 700; margin-bottom: .35rem; }
 input { width: 100%; min-height: 2.75rem; border: 1px solid #8795a8; border-radius: .35rem; padding: .55rem .7rem; font: inherit; color: inherit; }
 input:focus-visible, button:focus-visible, a:focus-visible, .status:focus-visible { outline: 3px solid #e6a400; outline-offset: 2px; }
+select:focus-visible, textarea:focus-visible, #edit-status:focus-visible { outline: 3px solid #e6a400; outline-offset: 2px; }
+select, textarea { max-width: 100%; font: inherit; padding: .5rem; }
+select { margin-bottom: 1rem; }
+textarea { width: 100%; resize: vertical; }
+dialog { width: min(36rem, calc(100% - 2rem)); max-height: calc(100% - 2rem); overflow: auto; border: 1px solid #8795a8; border-radius: .75rem; }
+dialog::backdrop { background: #18202b88; }
+#edit-form { grid-template-columns: 1fr; }
+#edit-tags { padding: 0; list-style: none; }
+#edit-tags li { overflow-wrap: anywhere; margin-top: .5rem; }
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
+.notes { white-space: pre-wrap; overflow-wrap: anywhere; }
+.tags { overflow-wrap: anywhere; }
 .help { margin: .35rem 0 0; }
 button { min-height: 2.75rem; border: 0; border-radius: .35rem; padding: .55rem 1rem; background: #1457a6; color: white; font: inherit; font-weight: 700; cursor: pointer; }
 button:hover { background: #0d4381; }
