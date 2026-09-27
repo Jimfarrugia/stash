@@ -3,13 +3,15 @@ const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs');
 const { DatabaseSync } = require('node:sqlite');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, randomBytes, createHmac, timingSafeEqual } = require('node:crypto');
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_URL_LENGTH = 8192;
 const MAX_TITLE_LENGTH = 500;
+const MAX_BACKUP_BYTES = 20 * 1024 * 1024;
+const BACKUP_FIELDS = ['url', 'title', 'notes', 'tags', 'createdAt', 'updatedAt', 'archived'];
 
 function defaultDataDirectory() {
   if (process.env.STASH_DATA_DIR) return path.resolve(process.env.STASH_DATA_DIR);
@@ -28,10 +30,10 @@ function databasePath(options = {}) {
   return path.join(options.dataDir ? path.resolve(options.dataDir) : defaultDataDirectory(), 'stash.sqlite');
 }
 
-function normalizeBookmarkUrl(value) {
+function normalizeBookmarkUrl(value, maxLength = MAX_URL_LENGTH) {
   if (typeof value !== 'string') throw new Error('URL is required.');
   const input = value.trim();
-  if (!input || input.length > MAX_URL_LENGTH) throw new Error('Enter an HTTP(S) URL.');
+  if (!input || input.length > maxLength) throw new Error('Enter an HTTP(S) URL.');
   let url;
   try {
     url = new URL(input);
@@ -179,6 +181,48 @@ function editBookmark(db, id, input) {
   return { bookmark: bookmarkFromRow(db.prepare('SELECT * FROM bookmarks WHERE id = ?').get(id)) };
 }
 
+function validateBackup(backup) {
+  const exactFields = (value, fields) => value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === fields.length && fields.every((field) => Object.hasOwn(value, field));
+  if (!exactFields(backup, ['format', 'version', 'bookmarks']) || backup.format !== 'stash' || backup.version !== 1) {
+    throw new Error('Use a Stash JSON backup with format "stash" and version 1.');
+  }
+  if (!Array.isArray(backup.bookmarks)) throw new Error('Backup bookmarks must be an array.');
+  if (backup.bookmarks.length > 10000) throw new Error('Backup exceeds the 10,000-entry limit.');
+  const validTime = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString() === value;
+  return backup.bookmarks.map((bookmark, index) => {
+    try {
+      if (!exactFields(bookmark, BACKUP_FIELDS) || typeof bookmark.title !== 'string' || !bookmark.title.trim() ||
+          typeof bookmark.notes !== 'string' || typeof bookmark.archived !== 'boolean' ||
+          !validTime(bookmark.createdAt) || !validTime(bookmark.updatedAt) ||
+          !Array.isArray(bookmark.tags) || bookmark.tags.some((tag) => typeof tag !== 'string' || !tag || tag !== tag.trim().toLowerCase()) ||
+          new Set(bookmark.tags).size !== bookmark.tags.length) {
+        throw new Error('Invalid fields, tags, or timestamps.');
+      }
+      // Backup strings are bounded by file size, not editor limits: normalized
+      // URLs (and URL fallback titles) can be longer than their original input.
+      return { ...bookmark, url: normalizeBookmarkUrl(bookmark.url, Infinity) };
+    } catch (error) {
+      throw new Error(`Bookmark ${index + 1}: ${error.message}`);
+    }
+  });
+}
+
+function planMerge(db, bookmarks) {
+  const existing = new Set(db.prepare('SELECT url FROM bookmarks').all().map((row) => row.url));
+  const seen = new Set();
+  let add = 0;
+  const entries = bookmarks.map((bookmark, index) => {
+    const reason = existing.has(bookmark.url) ? 'URL already in collection (active or archived)' :
+      seen.has(bookmark.url) ? 'Duplicate URL in this file' : null;
+    seen.add(bookmark.url);
+    if (!reason) add++;
+    return { index, url: bookmark.url, title: bookmark.title, reason };
+  });
+  return { add, skip: bookmarks.length - add, entries };
+}
+
 function json(response, status, body) {
   const payload = JSON.stringify(body);
   response.writeHead(status, {
@@ -190,7 +234,7 @@ function json(response, status, body) {
   response.end(payload);
 }
 
-function readBody(request) {
+function readBody(request, limit = MAX_BODY_BYTES, strictUtf8 = false) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -198,7 +242,7 @@ function readBody(request) {
     request.on('data', (chunk) => {
       if (tooLarge) return;
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         tooLarge = true;
         reject(Object.assign(new Error('Request body is too large.'), { status: 413 }));
         request.resume();
@@ -207,7 +251,13 @@ function readBody(request) {
       chunks.push(chunk);
     });
     request.on('end', () => {
-      if (!tooLarge) resolve(Buffer.concat(chunks).toString('utf8'));
+      if (tooLarge) return;
+      const bytes = Buffer.concat(chunks);
+      try {
+        resolve(strictUtf8 ? new TextDecoder('utf-8', { fatal: true }).decode(bytes) : bytes.toString('utf8'));
+      } catch {
+        reject(new Error('Backup must contain valid UTF-8 text.'));
+      }
     });
     request.on('error', reject);
   });
@@ -239,6 +289,8 @@ function originIsAllowed(origin, hostHeader, port) {
 function createServer(options = {}) {
   const file = databasePath(options);
   const db = createDatabase(file);
+  const previewSecret = randomBytes(32);
+  const previewToken = (body) => createHmac('sha256', previewSecret).update(body).digest('hex');
   async function handleRequest(request, response) {
     const port = server.address()?.port || options.port || 3000;
     if (!hostIsAllowed(request.headers.host, port)) {
@@ -261,6 +313,62 @@ function createServer(options = {}) {
     const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(request.method);
     if (isWrite && !originIsAllowed(request.headers.origin, request.headers.host, port)) {
       json(response, 403, { error: { code: 'invalid_origin', message: 'Cross-origin writes are not allowed.' } });
+      return;
+    }
+
+    if (request.method === 'GET' && pathname === '/api/backup') {
+      const bookmarks = db.prepare('SELECT * FROM bookmarks ORDER BY url').all().map((row) => {
+        const bookmark = bookmarkFromRow(row);
+        return Object.fromEntries(BACKUP_FIELDS.map((field) => [field, bookmark[field]]));
+      });
+      response.setHeader('Content-Disposition', 'attachment; filename="stash-backup.json"');
+      json(response, 200, { format: 'stash', version: 1, bookmarks });
+      return;
+    }
+
+    if (request.method === 'POST' && ['/api/backup/preview', '/api/backup/confirm'].includes(pathname)) {
+      try {
+        if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+          throw Object.assign(new Error('Send a Stash JSON backup.'), { status: 415 });
+        }
+        if (Number(request.headers['content-length']) > MAX_BACKUP_BYTES) {
+          request.resume();
+          throw Object.assign(new Error('Backup exceeds the 20 MiB limit.'), { status: 413 });
+        }
+        const body = await readBody(request, MAX_BACKUP_BYTES, true);
+        const bookmarks = validateBackup(JSON.parse(body));
+        const token = previewToken(body);
+        if (pathname.endsWith('/preview')) {
+          json(response, 200, { ...planMerge(db, bookmarks), token });
+          return;
+        }
+        const supplied = request.headers['x-stash-preview'];
+        if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) ||
+            !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) {
+          throw Object.assign(new Error('Preview this exact backup before confirming. After a restart, preview again.'), { status: 409 });
+        }
+        db.exec('BEGIN IMMEDIATE');
+        let plan;
+        try {
+          plan = planMerge(db, bookmarks);
+          const insert = db.prepare(`INSERT INTO bookmarks
+            (url, title, notes, tags, created_at, updated_at, archived, identity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+          for (const entry of plan.entries) {
+            if (entry.reason) continue;
+            const bookmark = bookmarks[entry.index];
+            insert.run(bookmark.url, bookmark.title, bookmark.notes, JSON.stringify(bookmark.tags),
+              bookmark.createdAt, bookmark.updatedAt, Number(bookmark.archived), randomUUID());
+          }
+          db.exec('COMMIT');
+        } catch (error) {
+          db.exec('ROLLBACK');
+          throw Object.assign(new Error('Import failed; no bookmarks were added.'), { status: 500 });
+        }
+        json(response, 200, plan);
+      } catch (error) {
+        json(response, error.status || (error instanceof SyntaxError ? 400 : 422),
+          { error: { code: 'invalid_backup', message: error.message } });
+      }
       return;
     }
 

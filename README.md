@@ -11,6 +11,13 @@ literal search across title, URL, notes, and tag names; every word must match.
 Selected tags use AND matching, and results can be sorted by newest/oldest saved,
 recently updated, or title.
 
+Use **Export JSON backup** to download the entire collection, including archived
+bookmarks, notes, tags and timestamps, regardless of filters. To merge a backup,
+choose a **Stash JSON file**, select **Preview JSON import**, review add/skip
+counts and reasons, then **Confirm merge**. Cancel makes no changes. Existing
+URLs are never overwritten or unarchived. Each import is limited to 20 MiB and
+10,000 entries. See [backup format and usage](docs/stash.md#json-backup-and-merge).
+
 When upgrading an existing installation, restart Stash and reload open tabs.
 The database automatically gains immutable bookmark identities so stale tabs
 cannot modify a replacement bookmark after deletion. See the
@@ -60,7 +67,6 @@ precedence. Stash displays the database location at startup and in the page.
 
 The following features are planned, **not yet implemented**:
 
-- Full-fidelity JSON backup and merge import.
 - Browser-bookmark HTML import/export for exchanging links and titles.
 
 ## Detailed documentation

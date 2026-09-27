@@ -299,4 +299,89 @@ document.querySelector('#clear-filters').addEventListener('click', () => {
   search.focus();
 });
 
+const importForm = document.querySelector('#import-form');
+const importFile = document.querySelector('#import-file');
+const importStatus = document.querySelector('#import-status');
+const importPreview = document.querySelector('#import-preview');
+const importError = document.querySelector('#import-error');
+const cancelImport = document.querySelector('#cancel-import');
+const confirmImport = document.querySelector('#confirm-import');
+let pendingImport;
+let confirmingImport = false;
+
+async function sendBackup(action, body, token) {
+  const response = await fetch(`/api/backup/${action}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { 'X-Stash-Preview': token } : {}) }, body,
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error?.message || 'Could not process backup.');
+  return result;
+}
+
+importForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = importForm.querySelector('button');
+  button.disabled = true;
+  importFile.disabled = true;
+  pendingImport = undefined;
+  importStatus.textContent = 'Validating backup…';
+  try {
+    const file = importFile.files[0];
+    if (!file) throw new Error('Choose a Stash JSON file.');
+    if (file.size > 20 * 1024 * 1024) throw new Error('Backup exceeds the 20 MiB limit.');
+    const body = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
+    const result = await sendBackup('preview', body);
+    pendingImport = { body, token: result.token };
+    document.querySelector('#import-summary').textContent = `${result.add} to add; ${result.skip} to skip.`;
+    const entries = document.querySelector('#import-entries');
+    entries.replaceChildren();
+    for (const entry of result.entries) {
+      const item = document.createElement('li');
+      item.textContent = `${entry.index + 1}. ${entry.title} — ${entry.url}: ${entry.reason || 'Add new bookmark'}`;
+      entries.append(item);
+    }
+    importError.textContent = '';
+    importStatus.textContent = '';
+    importPreview.showModal();
+    cancelImport.focus();
+  } catch (error) {
+    importStatus.textContent = error.message;
+    importStatus.focus();
+  } finally {
+    button.disabled = false;
+    importFile.disabled = false;
+  }
+});
+
+cancelImport.addEventListener('click', () => importPreview.close());
+importPreview.addEventListener('cancel', (event) => {
+  if (confirmingImport) event.preventDefault();
+});
+importPreview.addEventListener('close', () => {
+  pendingImport = undefined;
+  importForm.reset();
+  document.querySelector('#import-entries').replaceChildren();
+  importForm.querySelector('button').focus();
+});
+confirmImport.addEventListener('click', async () => {
+  if (!pendingImport || confirmingImport) return;
+  confirmingImport = true;
+  confirmImport.disabled = true;
+  cancelImport.disabled = true;
+  importError.textContent = 'Merging… please wait. Confirmation is in progress and cannot be cancelled.';
+  try {
+    const result = await sendBackup('confirm', pendingImport.body, pendingImport.token);
+    importPreview.close();
+    importStatus.textContent = `Added ${result.add}; skipped ${result.skip}. Existing bookmarks were not changed.`;
+    loadBookmarks();
+  } catch (error) {
+    importError.textContent = `${error.message} If the connection was lost, check the collection before retrying; repeating a merge cannot overwrite existing URLs.`;
+    importError.focus();
+  } finally {
+    confirmingImport = false;
+    confirmImport.disabled = false;
+    cancelImport.disabled = false;
+  }
+});
+
 loadBookmarks();

@@ -50,6 +50,85 @@ test.afterAll(async () => {
   fs.rmSync(database, { recursive: true, force: true });
 });
 
+test('JSON backup exports all records, previews inert text, cancels and explicitly confirms with accessible errors', async ({ page, request }) => {
+  const urls = ['https://example.com/json-archived', 'https://example.com/json-new'];
+  const created = (await (await request.post(`${running.baseURL}/api/bookmarks`, { data: { url: urls[0], title: 'Archived backup' } })).json()).bookmark;
+  await request.patch(`${running.baseURL}/api/bookmarks/${created.id}`, { data: { identity: created.identity, archived: true, notes: 'Keep original' } });
+  const network = [];
+  page.on('request', (req) => network.push(req.url()));
+  try {
+    await page.goto(`${running.baseURL}/`);
+    await page.getByLabel('Search bookmarks').fill('no match');
+    await page.getByRole('button', { name: 'Search', exact: true }).click();
+    const downloadEvent = page.waitForEvent('download');
+    await page.getByRole('link', { name: 'Export JSON backup' }).click();
+    const download = await downloadEvent;
+    const exported = JSON.parse(fs.readFileSync(await download.path(), 'utf8'));
+    expect(exported.bookmarks.find((b) => b.url === urls[0])).toMatchObject({ archived: true, notes: 'Keep original' });
+    const inert = '<img src=x onerror=alert(1)>';
+    const backup = { format: 'stash', version: 1, bookmarks: [exported.bookmarks.find((b) => b.url === urls[0]),
+      { url: urls[1], title: inert, notes: inert, tags: ['reading'], createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2021-01-01T00:00:00.000Z', archived: false }] };
+    backup.bookmarks.push({ ...backup.bookmarks[1] });
+    const upload = () => page.getByLabel('Stash JSON file').setInputFiles({ name: 'backup.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(backup)) });
+    await upload();
+    await page.getByRole('button', { name: 'Preview JSON import' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Preview JSON merge' });
+    await expect(dialog).toContainText('1 to add; 2 to skip');
+    await expect(dialog).toContainText('Duplicate URL in this file');
+    await expect(dialog).toContainText('already in collection');
+    await expect(dialog).toContainText(inert);
+    await expect(page.locator('img')).toHaveCount(0);
+    assert.equal(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth), true);
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).not.toBeVisible();
+    await expect(page.getByRole('button', { name: 'Preview JSON import' })).toBeFocused();
+    expect((await (await request.get(`${running.baseURL}/api/bookmarks?view=all`)).json()).bookmarks.some((b) => b.url === urls[1])).toBe(false);
+    await upload();
+    await page.getByRole('button', { name: 'Preview JSON import' }).click();
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(dialog).not.toBeVisible();
+    await upload();
+    await page.getByRole('button', { name: 'Preview JSON import' }).click();
+    await dialog.getByRole('button', { name: 'Confirm merge' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('#import-status')).toContainText('Added 1; skipped 2');
+    await page.getByRole('button', { name: 'Clear filters' }).click();
+    await expect(page.getByRole('heading', { name: inert, exact: true })).toBeVisible();
+    const all = (await (await request.get(`${running.baseURL}/api/bookmarks?view=all`)).json()).bookmarks;
+    expect(all.find((b) => b.url === urls[0])).toMatchObject({ archived: true, notes: 'Keep original' });
+    expect(all.find((b) => b.url === urls[1])).toMatchObject(backup.bookmarks[1]);
+    await page.getByLabel('Stash JSON file').setInputFiles({ name: 'bad.json', mimeType: 'application/json', buffer: Buffer.from('{') });
+    await page.getByRole('button', { name: 'Preview JSON import' }).click();
+    await expect(page.locator('#import-status')).toBeFocused();
+    await expect(page.locator('#import-status')).toHaveAttribute('role', 'alert');
+    await expect(page.locator('#import-status')).not.toBeEmpty();
+    const largeFile = path.join(database, 'large.json');
+    fs.writeFileSync(largeFile, Buffer.alloc(20 * 1024 * 1024 + 1, ' '));
+    await page.getByLabel('Stash JSON file').setInputFiles(largeFile);
+    const previewsBefore = network.filter((url) => url.endsWith('/api/backup/preview')).length;
+    await page.getByRole('button', { name: 'Preview JSON import' }).click();
+    await expect(page.locator('#import-status')).toContainText('20 MiB');
+    await expect(page.locator('#import-status')).toBeFocused();
+    expect(network.filter((url) => url.endsWith('/api/backup/preview')).length).toBe(previewsBefore);
+    await upload();
+    await page.getByRole('button', { name: 'Preview JSON import' }).click();
+    await page.route('**/api/backup/confirm', (route) => route.fulfill({ status: 500, contentType: 'application/json',
+      body: JSON.stringify({ error: { message: 'Import failed; no bookmarks were added.' } }) }));
+    await dialog.getByRole('button', { name: 'Confirm merge' }).click();
+    await expect(dialog.getByRole('alert')).toContainText('no bookmarks were added');
+    await expect(dialog.getByRole('alert')).toBeFocused();
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).not.toBeVisible();
+    assert.ok(network.every((url) => url.startsWith(running.baseURL)));
+  } finally {
+    const all = (await (await request.get(`${running.baseURL}/api/bookmarks?view=all`)).json()).bookmarks;
+    for (const bookmark of all.filter((b) => urls.includes(b.url))) {
+      await request.delete(`${running.baseURL}/api/bookmarks/${bookmark.id}`, { data: { identity: bookmark.identity, confirmed: true } });
+    }
+  }
+});
+
 test('finds literal terms with AND tags, views and sorts using narrow keyboard controls', async ({ page, request }) => {
   const records = [];
   for (const [slug, title, tags, archived] of [
