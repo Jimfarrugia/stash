@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+worker_model=$(sed -n 's/^model: //p' .opencode/agents/worker.md)
+[[ -n $worker_model ]] || { echo "error: worker model is missing" >&2; exit 1; }
+
+for agent in factory reviewer; do
+  agent_model=$(sed -n 's/^model: //p' ".opencode/agents/$agent.md")
+  [[ $agent_model == "$worker_model" ]] || {
+    echo "error: $agent model differs from worker model" >&2
+    exit 1
+  }
+done
+
+launcher_model=$(sed -nE 's|.*model: \{providerID: "([^"]+)", id: "([^"]+)", variant: "([^"]+)"\}.*|\1/\2#\3|p' scripts/factory-start-worker)
+[[ $launcher_model == "$worker_model" ]] || {
+  echo "error: worker launcher model differs from worker model" >&2
+  exit 1
+}
+
+printf 'Factory model consistency passed: %s\n' "$worker_model"

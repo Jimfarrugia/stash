@@ -19,6 +19,7 @@ required=(
   scripts/factory-start-worker
   docs/agents/issue-tracker.md
   docs/factory/workflow.md
+  scripts/check-factory-model
 )
 
 for path in "${required[@]}"; do
@@ -82,11 +83,12 @@ expected_ponytail=$(python -c 'import json; print(json.load(open("upstream-lock.
 actual_ponytail=$(cd vendor/ponytail && aggregate_hash)
 [[ $actual_ponytail == "$expected_ponytail" ]] || { echo "error: Ponytail vendor hash differs from upstream-lock.json" >&2; exit 1; }
 
-grep -q '^model: openai/gpt-5.6-luna#high$' .opencode/agents/factory.md
-grep -q '^model: openai/gpt-5.6-luna#high$' .opencode/agents/worker.md
-grep -q '^model: openai/gpt-5.6-luna#high$' .opencode/agents/reviewer.md
+grep -q '^model: openai/gpt-6-astra#medium$' .opencode/agents/factory.md
+grep -q '^model: openai/gpt-6-astra#medium$' .opencode/agents/worker.md
+grep -q '^model: openai/gpt-6-astra#medium$' .opencode/agents/reviewer.md
 git diff --check
-shellcheck scripts/factory-setup scripts/factory-start-worker scripts/factory-status scripts/validate-template
+shellcheck scripts/check-factory-model scripts/factory-setup scripts/factory-start-worker scripts/factory-status scripts/validate-template
+scripts/check-factory-model
 
 echo "Template validation passed."
 python3 scripts/test-handoff.py
