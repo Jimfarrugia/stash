@@ -18,6 +18,14 @@ counts and reasons, then **Confirm merge**. Cancel makes no changes. Existing
 URLs are never overwritten or unarchived. Each import is limited to 20 MiB and
 10,000 entries. See [backup format and usage](docs/stash.md#json-backup-and-merge).
 
+Use **Export browser HTML** to exchange portable links and titles with browsers;
+it includes active and archived bookmarks regardless of filters. To import a
+browser file, choose **Browser bookmark HTML file**, select **Preview HTML
+import**, then confirm the merge. Enclosing folder names become flat tags,
+imports create active bookmarks, and invalid or duplicate URLs are skipped.
+HTML is not a full-fidelity backup: use JSON to preserve notes, tags, dates and
+archive state. HTML imports are limited to 20 MiB/10,000 entries.
+
 When upgrading an existing installation, restart Stash and reload open tabs.
 The database automatically gains immutable bookmark identities so stale tabs
 cannot modify a replacement bookmark after deletion. See the
@@ -62,12 +70,6 @@ By default, the SQLite database lives outside the checkout:
 Set `STASH_DATA_DIR` to choose the directory containing `stash.sqlite`, or set
 `STASH_DB_PATH` to choose the complete database file path. `STASH_DB_PATH` takes
 precedence. Stash displays the database location at startup and in the page.
-
-## Planned roadmap
-
-The following features are planned, **not yet implemented**:
-
-- Browser-bookmark HTML import/export for exchanging links and titles.
 
 ## Detailed documentation
 

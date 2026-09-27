@@ -173,8 +173,8 @@ fragments. Uniqueness is checked again inside the confirmation transaction, so
 counts can change if another tab edits the collection after preview. There is
 no destructive restore or replacement option.
 
-JSON is the full-fidelity backup format. Browser-bookmark HTML exchange remains
-planned; its portability promise is links and titles, not all Stash fields.
+JSON is the full-fidelity backup format. Browser-bookmark HTML exchange is for
+portable links and titles, not preservation of all Stash fields.
 
 ### Version 1 format
 
@@ -240,3 +240,35 @@ Malformed JSON returns 400, invalid backup content/versions/entry counts 422,
 oversized requests 413, unsupported media types 415, and rolled-back database
 failures 500. Existing host/origin protections apply. Ordinary bookmark write
 requests retain their 64 KiB limit; only backup endpoints permit 20 MiB.
+
+## Browser-bookmark HTML exchange
+
+Choose **Export browser HTML** to download `stash-bookmarks.html`. It exports
+the complete collection, active and archived, regardless of the current view,
+search, tags or sort. The file uses the standard browser-bookmark HTML shape
+with portable HTTP(S) links, escaped titles and browser-compatible creation
+dates. HTML does not preserve notes, archive state or the complete Stash tag and
+timestamp model; use the JSON backup for full fidelity.
+
+To import a browser file, choose **Browser bookmark HTML file**, then **Preview
+HTML import**. Review every add/skip reason and explicitly choose **Confirm
+merge**. Cancel or Escape closes the preview without writing. Imports create
+active bookmarks; every enclosing folder name becomes a flat, lowercase tag,
+valid `ADD_DATE` values preserve creation time, and a blank title falls back to
+the normalized URL. Invalid or unsupported URLs, missing URLs, existing URLs
+(including archived records), and duplicate normalized URLs within the file
+are skipped without changing existing records. The first duplicate wins.
+
+HTML is parsed as untrusted text on the server. Markup is not executed and no
+saved or imported URL/resource is fetched. Exported links and titles are HTML
+escaped. Imports are limited to **20 MiB (20,971,520 bytes)** and **10,000
+bookmark entries**, counting invalid and duplicate anchor entries; limits are
+checked before any write. Preview tokens bind confirmation to the exact file,
+and confirmation rechecks uniqueness in an atomic transaction. A database
+failure rolls the whole import back.
+
+The HTML API is `GET /api/backup/html`, `POST /api/backup/html/preview`, and
+`POST /api/backup/html/confirm`. HTML requests use `text/html` (parameters are
+allowed), while JSON backup requests retain their exact `application/json`
+media-type requirement. Both formats ignore query filters for export and use
+the existing loopback, origin, request-size and identity protections.

@@ -130,6 +130,63 @@ test('JSON backup exports all records, previews inert text, cancels and explicit
   }
 });
 
+test('browser HTML export/import is portable, inert, cancellable and keyboard usable', async ({ page, request }) => {
+  const archivedUrl = 'https://example.com/html-archived';
+  const created = (await (await request.post(`${running.baseURL}/api/bookmarks`, { data: { url: archivedUrl, title: 'HTML archived' } })).json()).bookmark;
+  await request.patch(`${running.baseURL}/api/bookmarks/${created.id}`, { data: { identity: created.identity, archived: true } });
+  const html = `<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><p>
+    <DT><H3>Imported &amp; Folder</H3><DL><p>
+      <DT><A HREF="https://example.com/html-new">New <img src="https://evil.example/track" onerror="alert(1)"></A>
+      <DT><A HREF="https://example.com/html-new">Duplicate</A>
+      <DT><A HREF="javascript:alert(1)">Unsafe</A>
+    </DL><p>
+  </DL><p>`;
+  const upload = () => page.getByLabel('Browser bookmark HTML file').setInputFiles({
+    name: 'bookmarks.html', mimeType: 'text/html', buffer: Buffer.from(html),
+  });
+  const requests = [];
+  page.on('request', (request) => requests.push(request.url()));
+  try {
+    await page.goto(`${running.baseURL}/`);
+    await page.getByLabel('Search bookmarks').fill('does-not-match');
+    await page.getByRole('button', { name: 'Search', exact: true }).click();
+    const downloadEvent = page.waitForEvent('download');
+    await page.getByRole('link', { name: 'Export browser HTML' }).click();
+    const exported = await downloadEvent;
+    const exportedText = fs.readFileSync(await exported.path(), 'utf8');
+    expect(exportedText).toContain(archivedUrl);
+    expect(exportedText).toContain('HTML archived');
+
+    await upload();
+    await page.getByRole('button', { name: 'Preview HTML import' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Preview HTML merge' });
+    await expect(dialog).toContainText('1 to add; 2 to skip');
+    await expect(dialog).toContainText('Duplicate URL in this file');
+    await expect(dialog).toContainText('Only HTTP(S) URLs can be saved.');
+    await expect(page.locator('img')).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).not.toBeVisible();
+    await expect(page.getByRole('button', { name: 'Preview HTML import' })).toBeFocused();
+    expect((await (await request.get(`${running.baseURL}/api/bookmarks?view=all`)).json()).bookmarks.some((b) => b.url === 'https://example.com/html-new')).toBe(false);
+
+    await upload();
+    await page.getByRole('button', { name: 'Preview HTML import' }).click();
+    await dialog.getByRole('button', { name: 'Confirm merge' }).focus();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('#import-status')).toContainText('Added 1; skipped 2');
+    await page.getByRole('button', { name: 'Clear filters' }).click();
+    await expect(page.getByRole('heading', { name: 'New', exact: true })).toBeVisible();
+    await expect(page.locator('#bookmark-list').getByText('imported & folder', { exact: true })).toBeVisible();
+    expect(await page.locator('img').count()).toBe(0);
+    expect(requests.every((url) => url.startsWith(running.baseURL))).toBe(true);
+  } finally {
+    const all = (await (await request.get(`${running.baseURL}/api/bookmarks?view=all`)).json()).bookmarks;
+    for (const bookmark of all.filter((b) => [archivedUrl, 'https://example.com/html-new'].includes(b.url))) {
+      await request.delete(`${running.baseURL}/api/bookmarks/${bookmark.id}`, { data: { identity: bookmark.identity, confirmed: true } });
+    }
+  }
+});
+
 test('finds literal terms with AND tags, views and sorts using narrow keyboard controls', async ({ page, request }) => {
   const records = [];
   for (const [slug, title, tags, archived] of [
