@@ -88,6 +88,7 @@ test('JSON backup exports all records, previews inert text, cancels and explicit
     await expect(dialog).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(dialog).not.toBeVisible();
+    await expect(page.getByRole('button', { name: 'Preview JSON import' })).toBeFocused();
     await upload();
     await page.getByRole('button', { name: 'Preview JSON import' }).click();
     await dialog.getByRole('button', { name: 'Confirm merge' }).focus();
