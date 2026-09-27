@@ -4,7 +4,15 @@ Stash is a single-user, local-first bookmark manager that keeps your collection
 on your computer. Currently, you can save HTTP(S) links with an optional title
 and browse your saved bookmarks, newest first. Blank titles use the URL, duplicate
 URLs are reported without overwriting existing bookmarks, and saves persist
-across restarts.
+across restarts. Edit URLs, titles, plain-text notes and flat tags; archive and
+restore bookmarks; or permanently delete them after confirmation. Active is the
+default view, with Archived and All available.
+
+When upgrading an existing installation, restart Stash and reload open tabs.
+The database automatically gains immutable bookmark identities so stale tabs
+cannot modify a replacement bookmark after deletion. See the
+[API and migration notes](docs/stash.md#api-and-schema-contract) for API-client
+requirements.
 
 ## Quick start
 
@@ -25,7 +33,7 @@ Open the loopback URL printed by Stash. Enter a URL and optional title, then
 choose **Save bookmark** to add it to the list.
 
 Initial package/tool setup may need internet access. After setup, saving and
-listing bookmarks works offline; opening a saved website is a separate browser
+maintaining bookmarks works offline; opening a saved website is a separate browser
 action.
 
 ## Local data and privacy
@@ -49,8 +57,7 @@ precedence. Stash displays the database location at startup and in the page.
 
 The following features are planned, **not yet implemented**:
 
-- Editing bookmarks, notes and tags, archive/restore, and permanent deletion.
-- Search, filtering, and sort options.
+- Search, tag filtering, and additional sort options.
 - Full-fidelity JSON backup and merge import.
 - Browser-bookmark HTML import/export for exchanging links and titles.
 
