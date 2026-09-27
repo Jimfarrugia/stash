@@ -261,6 +261,22 @@ test('merge skips normalized duplicates, preserves existing records and rechecks
   assert.equal((await backupRequest(running.port, 'confirm', backup, preview.json.token)).json.add, 0);
 });
 
+test('backup media types require application/json while allowing parameters', async (t) => {
+  const database = temporaryDatabase();
+  const running = await serverFor(database.path);
+  t.after(async () => { await close(running.server); fs.rmSync(database.directory, { recursive: true, force: true }); });
+  const backup = { format: 'stash', version: 1, bookmarks: [backupFixture()] };
+  const headers = { 'Content-Type': 'application/json; charset=utf-8' };
+  const preview = await backupRequest(running.port, 'preview', backup, undefined, { headers });
+  assert.equal(preview.status, 200);
+  for (const action of ['preview', 'confirm']) {
+    assert.equal((await backupRequest(running.port, action, backup, preview.json.token,
+      { headers: { 'Content-Type': 'application/jsonfoo' } })).status, 415);
+  }
+  assert.deepEqual((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks, []);
+  assert.equal((await backupRequest(running.port, 'confirm', backup, preview.json.token, { headers })).status, 200);
+});
+
 test('invalid backups and limits reject the whole file, including chunked bodies and commit requests', async (t) => {
   const database = temporaryDatabase();
   const running = await serverFor(database.path);

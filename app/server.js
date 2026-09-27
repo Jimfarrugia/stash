@@ -328,7 +328,7 @@ function createServer(options = {}) {
 
     if (request.method === 'POST' && ['/api/backup/preview', '/api/backup/confirm'].includes(pathname)) {
       try {
-        if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+        if (String(request.headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
           throw Object.assign(new Error('Send a Stash JSON backup.'), { status: 415 });
         }
         if (Number(request.headers['content-length']) > MAX_BACKUP_BYTES) {
