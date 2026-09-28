@@ -34,7 +34,7 @@ The coordinator performs these writes in order:
 3. Create a sibling worktree under `../<repo>-worktrees/<issue>-<slug>`.
 4. Write the complete worker packet to a temporary prompt file outside the
    repository, then run
-   `scripts/factory-start-worker <issue> <worktree> <prompt-file>`. This creates
+   `scripts/factory-start-worker <issue> <worktree> <prompt-file> <coordinator-session>`. This creates
    a `worker` session with the worktree as its explicit OpenCode `location`,
    verifies that binding, and starts its prompt asynchronously.
 5. Post a machine-readable claim comment using the returned session ID:
@@ -51,6 +51,10 @@ state and logs under `.factory/sessions/` are disposable observations, not the
 durable queue.
 
 ## Completion
+
+Follow `docs/factory/completion-handoff.md`. Monitor resumed workers as well as
+new workers. Adopt existing sessions rather than creating duplicates. Continue
+the authorized queue on completion; respect pause requests and retry limits.
 
 After a worker opens a PR, replace `factory:running` with `factory:review` and
 launch `reviewer`. The coordinator may merge only after all required checks pass,
