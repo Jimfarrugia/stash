@@ -4,6 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { DatabaseSync } = require('node:sqlite');
 const { randomUUID, randomBytes, createHmac, timingSafeEqual } = require('node:crypto');
+const { HTML_ENTITIES, HTML_ENTITY_LEGACY_NAMES } = require('./html-entities');
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -225,37 +226,31 @@ function findHtmlTagEnd(input, start) {
   return -1;
 }
 
-const HTML_ENTITIES = {
-  amp: '&', apos: "'", gt: '>', lt: '<', nbsp: '\u00a0', quot: '"',
-  cent: '¢', pound: '£', yen: '¥', euro: '€', copy: '©', reg: '®', trade: '™',
-  sect: '§', para: '¶', middot: '·', bull: '•', hellip: '…', ndash: '–', mdash: '—',
-  laquo: '«', raquo: '»', lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”',
-  plusmn: '±', times: '×', divide: '÷', minus: '−', micro: 'µ', deg: '°',
-  sup2: '²', sup3: '³', frac12: '½', frac14: '¼', frac34: '¾',
-  Aacute: 'Á', aacute: 'á', Acirc: 'Â', acirc: 'â', Auml: 'Ä', auml: 'ä',
-  Atilde: 'Ã', atilde: 'ã', Aring: 'Å', aring: 'å', AElig: 'Æ', aelig: 'æ',
-  Ccedil: 'Ç', ccedil: 'ç', Eacute: 'É', eacute: 'é', Ecirc: 'Ê', ecirc: 'ê',
-  Euml: 'Ë', euml: 'ë', Iacute: 'Í', iacute: 'í', Icirc: 'Î', icirc: 'î',
-  Iuml: 'Ï', iuml: 'ï', Ntilde: 'Ñ', ntilde: 'ñ', Oacute: 'Ó', oacute: 'ó',
-  Ocirc: 'Ô', ocirc: 'ô', Ouml: 'Ö', ouml: 'ö', Otilde: 'Õ', otilde: 'õ',
-  Oslash: 'Ø', oslash: 'ø', Uacute: 'Ú', uacute: 'ú', Ucirc: 'Û', ucirc: 'û',
-  Uuml: 'Ü', uuml: 'ü', Yacute: 'Ý', yacute: 'ý', Yuml: 'Ÿ', yuml: 'ÿ',
+const NUMERIC_REFERENCE_REPLACEMENTS = {
+  0x80: 0x20ac, 0x82: 0x201a, 0x83: 0x192, 0x84: 0x201e, 0x85: 0x2026, 0x86: 0x2020,
+  0x87: 0x2021, 0x88: 0x2c6, 0x89: 0x2030, 0x8a: 0x160, 0x8b: 0x2039, 0x8c: 0x152,
+  0x8e: 0x17d, 0x91: 0x2018, 0x92: 0x2019, 0x93: 0x201c, 0x94: 0x201d, 0x95: 0x2022,
+  0x96: 0x2013, 0x97: 0x2014, 0x98: 0x2dc, 0x99: 0x2122, 0x9a: 0x161, 0x9b: 0x203a,
+  0x9c: 0x153, 0x9e: 0x17e, 0x9f: 0x178,
 };
 
-function decodeHtmlEntities(value) {
-  return value.replace(/&(#(?:x[\da-f]+|\d+)|[A-Za-z][A-Za-z\d]+);?/giu, (entity, reference) => {
-    const lower = reference.toLowerCase();
-    const named = HTML_ENTITIES[reference] ?? HTML_ENTITIES[lower];
-    if (named !== undefined) return named;
-    if (lower.startsWith('#x')) {
-      const codePoint = Number.parseInt(lower.slice(2), 16);
-      return Number.isSafeInteger(codePoint) && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
-    }
-    if (lower.startsWith('#')) {
-      const codePoint = Number.parseInt(lower.slice(1), 10);
-      return Number.isSafeInteger(codePoint) && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
-    }
-    return entity;
+function decodeNumericReference(reference) {
+  const hexadecimal = /^#x/iu.test(reference);
+  const codePoint = Number.parseInt(reference.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
+  if (!Number.isFinite(codePoint) || codePoint === 0 || codePoint > 0x10ffff ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff)) return '\ufffd';
+  return String.fromCodePoint(NUMERIC_REFERENCE_REPLACEMENTS[codePoint] || codePoint);
+}
+
+function decodeHtmlEntities(value, inAttribute = false) {
+  const references = /&(?:#(?:[xX][\da-fA-F]+|\d+)|[A-Za-z][A-Za-z\d]+);?/gu;
+  return value.replace(references, (entity, offset, source) => {
+    const reference = entity.slice(1, entity.endsWith(';') ? -1 : undefined);
+    const semicolon = entity.endsWith(';');
+    if (reference.startsWith('#')) return decodeNumericReference(reference);
+    if (!Object.hasOwn(HTML_ENTITIES, reference) || (!semicolon && !HTML_ENTITY_LEGACY_NAMES.has(reference))) return entity;
+    if (inAttribute && !semicolon && /[A-Za-z0-9=]/u.test(source[offset + entity.length] || '')) return entity;
+    return HTML_ENTITIES[reference];
   });
 }
 
@@ -264,7 +259,7 @@ function parseHtmlAttributes(source) {
   const pattern = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/gu;
   for (const match of source.matchAll(pattern)) {
     const name = match[1].toLowerCase();
-    if (!Object.hasOwn(attributes, name)) attributes[name] = decodeHtmlEntities(match[2] ?? match[3] ?? match[4] ?? '');
+    if (!Object.hasOwn(attributes, name)) attributes[name] = decodeHtmlEntities(match[2] ?? match[3] ?? match[4] ?? '', true);
   }
   return attributes;
 }
@@ -292,6 +287,11 @@ function parseBrowserBookmarkHtml(html) {
 
   while (position < html.length) {
     if (rawText) {
+      if (rawText === 'plaintext') {
+        appendText(html.slice(position));
+        position = html.length;
+        break;
+      }
       const closingTag = new RegExp(`</\\s*${rawText}\\s*>`, 'giu');
       closingTag.lastIndex = position;
       const match = closingTag.exec(html);
@@ -330,7 +330,7 @@ function parseBrowserBookmarkHtml(html) {
     const closing = Boolean(match[1]);
     const name = match[2].toLowerCase();
 
-    if (!closing && ['script', 'style'].includes(name)) {
+    if (!closing && ['script', 'style', 'title', 'textarea', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext'].includes(name)) {
       rawText = name;
       continue;
     }

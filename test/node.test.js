@@ -284,16 +284,22 @@ test('browser HTML tokenizer ignores raw text, preserves unquoted URL slashes an
   t.after(async () => { await close(running.server); fs.rmSync(database.directory, { recursive: true, force: true }); });
   const html = `<script><A HREF="https://example.com/false-script">False script</A></script>
     <style><A HREF="https://example.com/false-style">False style</A></style>
-    <DL><p><DT><A HREF=https://example.com/unquoted/path/>Caf&eacute; &copy; &#x1F4DA; &amp; &eacute;</A></DL>`;
+    <title><A HREF="https://example.com/false-title">False title</A></title>
+    <textarea><A HREF="https://example.com/false-textarea">False textarea</A></textarea>
+    <DL><p><DT><A HREF=https://example.com/unquoted/path/>Unquoted</A>
+      <DT><A HREF="https://example.com/?x=1&amp=2">Caf&eacute; &NotEqualTilde; &rarr; &notin; &#x1F4DA; &amp=2 &amp;</A></DL>
+    <plaintext><A HREF="https://example.com/false-plaintext">False plaintext</A>`;
   const preview = await htmlRequest(running.port, 'preview', html);
   assert.equal(preview.status, 200);
-  assert.equal(preview.json.add, 1);
-  assert.equal(preview.json.entries.length, 1);
+  assert.equal(preview.json.add, 2);
+  assert.equal(preview.json.entries.length, 2);
   assert.equal(preview.json.entries[0].url, 'https://example.com/unquoted/path/');
-  assert.equal(preview.json.entries[0].title, 'Café © 📚 & é');
+  assert.equal(preview.json.entries[0].title, 'Unquoted');
+  assert.equal(preview.json.entries[1].url, 'https://example.com/?x=1&amp=2');
+  assert.equal(preview.json.entries[1].title, 'Café ≂̸ → ∉ 📚 &=2 &');
   const confirmed = await htmlRequest(running.port, 'confirm', html, preview.json.token);
   assert.equal(confirmed.status, 200);
-  assert.deepEqual((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks.map((bookmark) => bookmark.url), ['https://example.com/unquoted/path/']);
+  assert.deepEqual((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks.map((bookmark) => bookmark.url).sort(), ['https://example.com/?x=1&amp=2', 'https://example.com/unquoted/path/']);
 });
 
 test('pathological unterminated HTML completes without blocking a subsequent request', async (t) => {
