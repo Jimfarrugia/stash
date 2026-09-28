@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const { performance } = require('node:perf_hooks');
 const { DatabaseSync } = require('node:sqlite');
 
 test('migrates legacy identity and rejects stale mutations after delete/recreate and restart', async (t) => {
@@ -275,6 +276,38 @@ test('browser HTML limits and confirmed failures leave the collection unchanged'
   assert.deepEqual((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks, []);
   running.server.stash.db.exec('DROP TRIGGER fail_html');
   assert.equal((await htmlRequest(running.port, 'confirm', browserFixture, preview.json.token)).json.add, 4);
+});
+
+test('browser HTML tokenizer ignores raw text, preserves unquoted URL slashes and decodes entities', async (t) => {
+  const database = temporaryDatabase();
+  const running = await serverFor(database.path);
+  t.after(async () => { await close(running.server); fs.rmSync(database.directory, { recursive: true, force: true }); });
+  const html = `<script><A HREF="https://example.com/false-script">False script</A></script>
+    <style><A HREF="https://example.com/false-style">False style</A></style>
+    <DL><p><DT><A HREF=https://example.com/unquoted/path/>Caf&eacute; &copy; &#x1F4DA; &amp; &eacute;</A></DL>`;
+  const preview = await htmlRequest(running.port, 'preview', html);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.json.add, 1);
+  assert.equal(preview.json.entries.length, 1);
+  assert.equal(preview.json.entries[0].url, 'https://example.com/unquoted/path/');
+  assert.equal(preview.json.entries[0].title, 'Café © 📚 & é');
+  const confirmed = await htmlRequest(running.port, 'confirm', html, preview.json.token);
+  assert.equal(confirmed.status, 200);
+  assert.deepEqual((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks.map((bookmark) => bookmark.url), ['https://example.com/unquoted/path/']);
+});
+
+test('pathological unterminated HTML completes without blocking a subsequent request', async (t) => {
+  const database = temporaryDatabase();
+  const running = await serverFor(database.path);
+  t.after(async () => { await close(running.server); fs.rmSync(database.directory, { recursive: true, force: true }); });
+  const malformed = '<'.repeat(20 * 1024 * 1024);
+  const malformedRequest = htmlRequest(running.port, 'preview', malformed);
+  const started = performance.now();
+  const followup = await request(running.port, '/api/bookmarks');
+  const elapsed = performance.now() - started;
+  assert.equal(followup.status, 200);
+  assert.ok(elapsed < 2000, `subsequent request took ${elapsed.toFixed(1)}ms`);
+  assert.equal((await malformedRequest).status, 200);
 });
 
 test('JSON export ignores filters and preview/confirmed merge round-trips bookmark content', async (t) => {

@@ -131,6 +131,7 @@ test('JSON backup exports all records, previews inert text, cancels and explicit
 });
 
 test('browser HTML export/import is portable, inert, cancellable and keyboard usable', async ({ page, request }) => {
+  await page.setViewportSize({ width: 375, height: 667 });
   const archivedUrl = 'https://example.com/html-archived';
   const created = (await (await request.post(`${running.baseURL}/api/bookmarks`, { data: { url: archivedUrl, title: 'HTML archived' } })).json()).bookmark;
   await request.patch(`${running.baseURL}/api/bookmarks/${created.id}`, { data: { identity: created.identity, archived: true } });
@@ -161,6 +162,8 @@ test('browser HTML export/import is portable, inert, cancellable and keyboard us
     await page.getByRole('button', { name: 'Preview HTML import' }).click();
     const dialog = page.getByRole('dialog', { name: 'Preview HTML merge' });
     await expect(dialog).toContainText('1 to add; 2 to skip');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     await expect(dialog).toContainText('Duplicate URL in this file');
     await expect(dialog).toContainText('Only HTTP(S) URLs can be saved.');
     await expect(page.locator('img')).toHaveCount(0);
@@ -178,6 +181,7 @@ test('browser HTML export/import is portable, inert, cancellable and keyboard us
     await expect(page.getByRole('heading', { name: 'New', exact: true })).toBeVisible();
     await expect(page.locator('#bookmark-list').getByText('imported & folder', { exact: true })).toBeVisible();
     expect(await page.locator('img').count()).toBe(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     expect(requests.every((url) => url.startsWith(running.baseURL))).toBe(true);
   } finally {
     const all = (await (await request.get(`${running.baseURL}/api/bookmarks?view=all`)).json()).bookmarks;

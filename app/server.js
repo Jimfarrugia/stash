@@ -225,11 +225,28 @@ function findHtmlTagEnd(input, start) {
   return -1;
 }
 
+const HTML_ENTITIES = {
+  amp: '&', apos: "'", gt: '>', lt: '<', nbsp: '\u00a0', quot: '"',
+  cent: '¢', pound: '£', yen: '¥', euro: '€', copy: '©', reg: '®', trade: '™',
+  sect: '§', para: '¶', middot: '·', bull: '•', hellip: '…', ndash: '–', mdash: '—',
+  laquo: '«', raquo: '»', lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”',
+  plusmn: '±', times: '×', divide: '÷', minus: '−', micro: 'µ', deg: '°',
+  sup2: '²', sup3: '³', frac12: '½', frac14: '¼', frac34: '¾',
+  Aacute: 'Á', aacute: 'á', Acirc: 'Â', acirc: 'â', Auml: 'Ä', auml: 'ä',
+  Atilde: 'Ã', atilde: 'ã', Aring: 'Å', aring: 'å', AElig: 'Æ', aelig: 'æ',
+  Ccedil: 'Ç', ccedil: 'ç', Eacute: 'É', eacute: 'é', Ecirc: 'Ê', ecirc: 'ê',
+  Euml: 'Ë', euml: 'ë', Iacute: 'Í', iacute: 'í', Icirc: 'Î', icirc: 'î',
+  Iuml: 'Ï', iuml: 'ï', Ntilde: 'Ñ', ntilde: 'ñ', Oacute: 'Ó', oacute: 'ó',
+  Ocirc: 'Ô', ocirc: 'ô', Ouml: 'Ö', ouml: 'ö', Otilde: 'Õ', otilde: 'õ',
+  Oslash: 'Ø', oslash: 'ø', Uacute: 'Ú', uacute: 'ú', Ucirc: 'Û', ucirc: 'û',
+  Uuml: 'Ü', uuml: 'ü', Yacute: 'Ý', yacute: 'ý', Yuml: 'Ÿ', yuml: 'ÿ',
+};
+
 function decodeHtmlEntities(value) {
-  const named = { amp: '&', apos: "'", gt: '>', lt: '<', nbsp: '\u00a0', quot: '"' };
-  return value.replace(/&(#(?:x[\da-f]+|\d+)|[a-z][a-z\d]+);?/giu, (entity, reference) => {
+  return value.replace(/&(#(?:x[\da-f]+|\d+)|[A-Za-z][A-Za-z\d]+);?/giu, (entity, reference) => {
     const lower = reference.toLowerCase();
-    if (Object.hasOwn(named, lower)) return named[lower];
+    const named = HTML_ENTITIES[reference] ?? HTML_ENTITIES[lower];
+    if (named !== undefined) return named;
     if (lower.startsWith('#x')) {
       const codePoint = Number.parseInt(lower.slice(2), 16);
       return Number.isSafeInteger(codePoint) && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
@@ -259,7 +276,13 @@ function parseBrowserBookmarkHtml(html) {
   let pendingFolder;
   let heading;
   let anchor;
+  let rawText;
   let position = 0;
+
+  const appendText = (text) => {
+    if (anchor) anchor.text += decodeHtmlEntities(text);
+    else if (heading) heading.text += decodeHtmlEntities(text);
+  };
 
   const finishAnchor = () => {
     if (!anchor) return;
@@ -268,11 +291,24 @@ function parseBrowserBookmarkHtml(html) {
   };
 
   while (position < html.length) {
+    if (rawText) {
+      const closingTag = new RegExp(`</\\s*${rawText}\\s*>`, 'giu');
+      closingTag.lastIndex = position;
+      const match = closingTag.exec(html);
+      if (!match) {
+        appendText(html.slice(position));
+        position = html.length;
+        break;
+      }
+      appendText(html.slice(position, match.index));
+      position = match.index;
+      rawText = undefined;
+      continue;
+    }
     if (html[position] !== '<') {
       const next = html.indexOf('<', position);
       const text = html.slice(position, next < 0 ? html.length : next);
-      if (anchor) anchor.text += decodeHtmlEntities(text);
-      else if (heading) heading.text += decodeHtmlEntities(text);
+      appendText(text);
       position = next < 0 ? html.length : next;
       continue;
     }
@@ -283,9 +319,9 @@ function parseBrowserBookmarkHtml(html) {
     }
     const end = findHtmlTagEnd(html, position);
     if (end < 0) {
-      if (anchor) anchor.text += '<';
-      position++;
-      continue;
+      appendText(html.slice(position));
+      position = html.length;
+      break;
     }
     const source = html.slice(position, end + 1);
     const match = source.match(/^<\s*(\/?)\s*([a-z][\w:-]*)([\s\S]*?)>$/iu);
@@ -294,6 +330,10 @@ function parseBrowserBookmarkHtml(html) {
     const closing = Boolean(match[1]);
     const name = match[2].toLowerCase();
 
+    if (!closing && ['script', 'style'].includes(name)) {
+      rawText = name;
+      continue;
+    }
     if (anchor && ((closing && ['a', 'dt', 'dl', 'h3'].includes(name)) || (!closing && name === 'a'))) finishAnchor();
     if (anchor) {
       if (closing && name === 'a') continue;
@@ -316,7 +356,7 @@ function parseBrowserBookmarkHtml(html) {
     } else if (closing && name === 'dl') {
       if (dlFolders.pop()) folders.pop();
     } else if (!closing && name === 'a') {
-      anchor = { attributes: parseHtmlAttributes(match[3].replace(/\/\s*$/u, '')), text: '', folders: [...folders] };
+      anchor = { attributes: parseHtmlAttributes(match[3]), text: '', folders: [...folders] };
     }
   }
   finishAnchor();
