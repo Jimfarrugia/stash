@@ -4,6 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { DatabaseSync } = require('node:sqlite');
 const { randomUUID, randomBytes, createHmac, timingSafeEqual } = require('node:crypto');
+const parse5Ready = import('parse5').then(({ parseFragment }) => parseFragment);
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -11,6 +12,7 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_URL_LENGTH = 8192;
 const MAX_TITLE_LENGTH = 500;
 const MAX_BACKUP_BYTES = 20 * 1024 * 1024;
+const MAX_IMPORT_ENTRIES = 10000;
 const BACKUP_FIELDS = ['url', 'title', 'notes', 'tags', 'createdAt', 'updatedAt', 'archived'];
 
 function defaultDataDirectory() {
@@ -188,7 +190,7 @@ function validateBackup(backup) {
     throw new Error('Use a Stash JSON backup with format "stash" and version 1.');
   }
   if (!Array.isArray(backup.bookmarks)) throw new Error('Backup bookmarks must be an array.');
-  if (backup.bookmarks.length > 10000) throw new Error('Backup exceeds the 10,000-entry limit.');
+  if (backup.bookmarks.length > MAX_IMPORT_ENTRIES) throw new Error('Backup exceeds the 10,000-entry limit.');
   const validTime = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value)) &&
     new Date(value).toISOString() === value;
   return backup.bookmarks.map((bookmark, index) => {
@@ -209,18 +211,127 @@ function validateBackup(backup) {
   });
 }
 
-function planMerge(db, bookmarks) {
+function htmlText(node) {
+  return (node.childNodes || []).map((child) => child.nodeName === '#text' ? child.value : htmlText(child)).join('');
+}
+
+function htmlAttribute(node, name) {
+  return node.attrs?.find((attribute) => attribute.name === name)?.value;
+}
+
+async function parseBrowserBookmarkHtml(html) {
+  const parseFragment = await parse5Ready;
+  const root = parseFragment(html);
+  const rawEntries = [];
+
+  function visit(nodes, folders) {
+    let pendingFolder;
+    for (const node of nodes || []) {
+      if (node.nodeName === 'h3') {
+        pendingFolder = htmlText(node).trim();
+        continue;
+      }
+      if (node.nodeName === 'dl') {
+        visit(node.childNodes, pendingFolder ? [...folders, pendingFolder] : folders);
+        pendingFolder = undefined;
+        continue;
+      }
+      if (node.nodeName === 'a') {
+        rawEntries.push({
+          href: htmlAttribute(node, 'href'),
+          add_date: htmlAttribute(node, 'add_date'),
+          title: htmlText(node),
+          folders: [...folders],
+        });
+        continue;
+      }
+      visit(node.childNodes, folders);
+    }
+  }
+
+  visit(root.childNodes, []);
+  return rawEntries;
+}
+
+function htmlCreationDate(value) {
+  if (typeof value !== 'string' || !/^-?\d+$/u.test(value.trim())) return undefined;
+  const seconds = Number(value.trim());
+  if (!Number.isSafeInteger(seconds)) return undefined;
+  const date = new Date(seconds * 1000);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
+async function htmlImportCandidates(html) {
+  const rawEntries = await parseBrowserBookmarkHtml(html);
+  if (rawEntries.length > MAX_IMPORT_ENTRIES) throw new Error('HTML import exceeds the 10,000-entry limit.');
+  const now = new Date().toISOString();
+  return rawEntries.map((entry) => {
+    const rawUrl = typeof entry.href === 'string' ? entry.href.trim() : '';
+    const displayTitle = entry.title.trim() || rawUrl;
+    if (!rawUrl) return { bookmark: null, url: rawUrl, title: displayTitle, reason: 'Missing URL' };
+    let url;
+    try {
+      url = normalizeBookmarkUrl(rawUrl);
+    } catch (error) {
+      return { bookmark: null, url: rawUrl, title: displayTitle, reason: error.message };
+    }
+    const createdAt = htmlCreationDate(entry.add_date) || now;
+    const tags = [...new Set(entry.folders.map((folder) => folder.trim().toLowerCase()).filter(Boolean))];
+    return {
+      bookmark: { url, title: entry.title.trim() || url, notes: '', tags, createdAt, updatedAt: createdAt, archived: false },
+      url,
+      title: entry.title.trim() || url,
+    };
+  });
+}
+
+function planMerge(db, candidates) {
   const existing = new Set(db.prepare('SELECT url FROM bookmarks').all().map((row) => row.url));
   const seen = new Set();
   let add = 0;
-  const entries = bookmarks.map((bookmark, index) => {
-    const reason = existing.has(bookmark.url) ? 'URL already in collection (active or archived)' :
-      seen.has(bookmark.url) ? 'Duplicate URL in this file' : null;
-    seen.add(bookmark.url);
+  const entries = candidates.map((candidate, index) => {
+    const reason = candidate.reason || (existing.has(candidate.bookmark.url) ? 'URL already in collection (active or archived)' :
+      seen.has(candidate.bookmark.url) ? 'Duplicate URL in this file' : null);
+    if (candidate.bookmark) seen.add(candidate.bookmark.url);
     if (!reason) add++;
-    return { index, url: bookmark.url, title: bookmark.title, reason };
+    return { index, url: candidate.url, title: candidate.title, reason };
   });
-  return { add, skip: bookmarks.length - add, entries };
+  return { add, skip: candidates.length - add, entries };
+}
+
+function commitMerge(db, candidates) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const plan = planMerge(db, candidates);
+    const insert = db.prepare(`INSERT INTO bookmarks
+      (url, title, notes, tags, created_at, updated_at, archived, identity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const entry of plan.entries) {
+      if (entry.reason) continue;
+      const bookmark = candidates[entry.index].bookmark;
+      insert.run(bookmark.url, bookmark.title, bookmark.notes, JSON.stringify(bookmark.tags),
+        bookmark.createdAt, bookmark.updatedAt, Number(bookmark.archived), randomUUID());
+    }
+    db.exec('COMMIT');
+    return plan;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw Object.assign(new Error('Import failed; no bookmarks were added.'), { status: 500, cause: error });
+  }
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/gu, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+}
+
+function browserBookmarkHtml(db) {
+  const links = db.prepare('SELECT url, title, created_at FROM bookmarks ORDER BY url').all().map((bookmark) => {
+    const seconds = Math.floor(Date.parse(bookmark.created_at) / 1000);
+    return `    <DT><A HREF="${escapeHtml(bookmark.url)}" ADD_DATE="${seconds}">${escapeHtml(bookmark.title)}</A>`;
+  });
+  return `<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<!-- This is a portable Stash export. JSON preserves the complete collection. -->\n` +
+    '<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">\n' +
+    '<TITLE>Stash bookmarks</TITLE>\n<H1>Stash bookmarks</H1>\n<DL><p>\n' +
+    `${links.join('\n')}\n</DL><p>\n`;
 }
 
 function json(response, status, body) {
@@ -316,6 +427,19 @@ function createServer(options = {}) {
       return;
     }
 
+    if (request.method === 'GET' && pathname === '/api/backup/html') {
+      const body = browserBookmarkHtml(db);
+      response.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': Buffer.byteLength(body),
+        'Content-Disposition': 'attachment; filename="stash-bookmarks.html"',
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      response.end(body);
+      return;
+    }
+
     if (request.method === 'GET' && pathname === '/api/backup') {
       const bookmarks = db.prepare('SELECT * FROM bookmarks ORDER BY url').all().map((row) => {
         const bookmark = bookmarkFromRow(row);
@@ -323,6 +447,35 @@ function createServer(options = {}) {
       });
       response.setHeader('Content-Disposition', 'attachment; filename="stash-backup.json"');
       json(response, 200, { format: 'stash', version: 1, bookmarks });
+      return;
+    }
+
+    if (request.method === 'POST' && ['/api/backup/html/preview', '/api/backup/html/confirm'].includes(pathname)) {
+      try {
+        if (String(request.headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase() !== 'text/html') {
+          throw Object.assign(new Error('Send a browser-bookmark HTML file.'), { status: 415 });
+        }
+        if (Number(request.headers['content-length']) > MAX_BACKUP_BYTES) {
+          request.resume();
+          throw Object.assign(new Error('HTML import exceeds the 20 MiB limit.'), { status: 413 });
+        }
+        const body = await readBody(request, MAX_BACKUP_BYTES, true);
+        const candidates = await htmlImportCandidates(body);
+        const token = previewToken(body);
+        if (pathname.endsWith('/preview')) {
+          json(response, 200, { ...planMerge(db, candidates), token });
+          return;
+        }
+        const supplied = request.headers['x-stash-preview'];
+        if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/u.test(supplied) ||
+            !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) {
+          throw Object.assign(new Error('Preview this exact HTML file before confirming. After a restart, preview again.'), { status: 409 });
+        }
+        json(response, 200, commitMerge(db, candidates));
+      } catch (error) {
+        json(response, error.status || (error instanceof SyntaxError ? 400 : 422),
+          { error: { code: 'invalid_html', message: error.message } });
+      }
       return;
     }
 
@@ -337,9 +490,10 @@ function createServer(options = {}) {
         }
         const body = await readBody(request, MAX_BACKUP_BYTES, true);
         const bookmarks = validateBackup(JSON.parse(body));
+        const candidates = bookmarks.map((bookmark) => ({ bookmark, url: bookmark.url, title: bookmark.title }));
         const token = previewToken(body);
         if (pathname.endsWith('/preview')) {
-          json(response, 200, { ...planMerge(db, bookmarks), token });
+          json(response, 200, { ...planMerge(db, candidates), token });
           return;
         }
         const supplied = request.headers['x-stash-preview'];
@@ -347,24 +501,7 @@ function createServer(options = {}) {
             !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) {
           throw Object.assign(new Error('Preview this exact backup before confirming. After a restart, preview again.'), { status: 409 });
         }
-        db.exec('BEGIN IMMEDIATE');
-        let plan;
-        try {
-          plan = planMerge(db, bookmarks);
-          const insert = db.prepare(`INSERT INTO bookmarks
-            (url, title, notes, tags, created_at, updated_at, archived, identity) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
-          for (const entry of plan.entries) {
-            if (entry.reason) continue;
-            const bookmark = bookmarks[entry.index];
-            insert.run(bookmark.url, bookmark.title, bookmark.notes, JSON.stringify(bookmark.tags),
-              bookmark.createdAt, bookmark.updatedAt, Number(bookmark.archived), randomUUID());
-          }
-          db.exec('COMMIT');
-        } catch (error) {
-          db.exec('ROLLBACK');
-          throw Object.assign(new Error('Import failed; no bookmarks were added.'), { status: 500 });
-        }
-        json(response, 200, plan);
+        json(response, 200, commitMerge(db, candidates));
       } catch (error) {
         json(response, error.status || (error instanceof SyntaxError ? 400 : 422),
           { error: { code: 'invalid_backup', message: error.message } });

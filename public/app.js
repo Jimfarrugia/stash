@@ -299,69 +299,79 @@ document.querySelector('#clear-filters').addEventListener('click', () => {
   search.focus();
 });
 
-const importForm = document.querySelector('#import-form');
-const importFile = document.querySelector('#import-file');
+const importConfigs = [
+  { kind: 'json', form: document.querySelector('#import-form'), file: document.querySelector('#import-file'), label: 'Stash JSON file', endpoint: '/api/backup' },
+  { kind: 'html', form: document.querySelector('#html-import-form'), file: document.querySelector('#html-import-file'), label: 'Browser bookmark HTML file', endpoint: '/api/backup/html' },
+];
 const importStatus = document.querySelector('#import-status');
 const importPreview = document.querySelector('#import-preview');
 const importError = document.querySelector('#import-error');
 const cancelImport = document.querySelector('#cancel-import');
 const confirmImport = document.querySelector('#confirm-import');
 let pendingImport;
+let activeImportForm;
 let confirmingImport = false;
 
-async function sendBackup(action, body, token) {
-  const response = await fetch(`/api/backup/${action}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { 'X-Stash-Preview': token } : {}) }, body,
+async function sendImport(config, action, body, token) {
+  const response = await fetch(`${config.endpoint}/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': config.kind === 'html' ? 'text/html' : 'application/json', ...(token ? { 'X-Stash-Preview': token } : {}) },
+    body,
   });
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error?.message || 'Could not process backup.');
+  if (!response.ok) throw new Error(result.error?.message || 'Could not process import.');
   return result;
 }
 
-importForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const button = importForm.querySelector('button');
-  button.disabled = true;
-  importFile.disabled = true;
-  pendingImport = undefined;
-  importStatus.textContent = 'Validating backup…';
-  try {
-    const file = importFile.files[0];
-    if (!file) throw new Error('Choose a Stash JSON file.');
-    if (file.size > 20 * 1024 * 1024) throw new Error('Backup exceeds the 20 MiB limit.');
-    const body = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
-    const result = await sendBackup('preview', body);
-    pendingImport = { body, token: result.token };
-    document.querySelector('#import-summary').textContent = `${result.add} to add; ${result.skip} to skip.`;
-    const entries = document.querySelector('#import-entries');
-    entries.replaceChildren();
-    for (const entry of result.entries) {
-      const item = document.createElement('li');
-      item.textContent = `${entry.index + 1}. ${entry.title} — ${entry.url}: ${entry.reason || 'Add new bookmark'}`;
-      entries.append(item);
+for (const config of importConfigs) {
+  config.form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = config.form.querySelector('button');
+    button.disabled = true;
+    config.file.disabled = true;
+    pendingImport = undefined;
+    activeImportForm = config.form;
+    importStatus.textContent = `Validating ${config.kind === 'html' ? 'HTML file' : 'backup'}…`;
+    try {
+      const file = config.file.files[0];
+      if (!file) throw new Error(`Choose a ${config.label}.`);
+      if (file.size > 20 * 1024 * 1024) throw new Error('Import exceeds the 20 MiB limit.');
+      const body = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
+      const result = await sendImport(config, 'preview', body);
+      pendingImport = { body, token: result.token, config, form: config.form };
+      document.querySelector('#import-heading').textContent = `Preview ${config.kind.toUpperCase()} merge`;
+      document.querySelector('#import-summary').textContent = `${result.add} to add; ${result.skip} to skip.`;
+      const entries = document.querySelector('#import-entries');
+      entries.replaceChildren();
+      for (const entry of result.entries) {
+        const item = document.createElement('li');
+        item.textContent = `${entry.index + 1}. ${entry.title} — ${entry.url}: ${entry.reason || 'Add new bookmark'}`;
+        entries.append(item);
+      }
+      importError.textContent = '';
+      importStatus.textContent = '';
+      importPreview.showModal();
+      cancelImport.focus();
+    } catch (error) {
+      importStatus.textContent = error.message;
+      importStatus.focus();
+    } finally {
+      button.disabled = false;
+      config.file.disabled = false;
     }
-    importError.textContent = '';
-    importStatus.textContent = '';
-    importPreview.showModal();
-    cancelImport.focus();
-  } catch (error) {
-    importStatus.textContent = error.message;
-    importStatus.focus();
-  } finally {
-    button.disabled = false;
-    importFile.disabled = false;
-  }
-});
+  });
+}
 
 cancelImport.addEventListener('click', () => importPreview.close());
 importPreview.addEventListener('cancel', (event) => {
   if (confirmingImport) event.preventDefault();
 });
 importPreview.addEventListener('close', () => {
+  const form = pendingImport?.form || activeImportForm;
   pendingImport = undefined;
-  importForm.reset();
+  for (const config of importConfigs) config.form.reset();
   document.querySelector('#import-entries').replaceChildren();
-  importForm.querySelector('button').focus();
+  form?.querySelector('button').focus();
 });
 confirmImport.addEventListener('click', async () => {
   if (!pendingImport || confirmingImport) return;
@@ -370,7 +380,7 @@ confirmImport.addEventListener('click', async () => {
   cancelImport.disabled = true;
   importError.textContent = 'Merging… please wait. Confirmation is in progress and cannot be cancelled.';
   try {
-    const result = await sendBackup('confirm', pendingImport.body, pendingImport.token);
+    const result = await sendImport(pendingImport.config, 'confirm', pendingImport.body, pendingImport.token);
     importPreview.close();
     importStatus.textContent = `Added ${result.add}; skipped ${result.skip}. Existing bookmarks were not changed.`;
     loadBookmarks();

@@ -18,6 +18,14 @@ counts and reasons, then **Confirm merge**. Cancel makes no changes. Existing
 URLs are never overwritten or unarchived. Each import is limited to 20 MiB and
 10,000 entries. See [backup format and usage](docs/stash.md#json-backup-and-merge).
 
+Use **Export browser HTML** to exchange portable links and titles with browsers;
+it includes active and archived bookmarks regardless of filters. To import a
+browser file, choose **Browser bookmark HTML file**, select **Preview HTML
+import**, then confirm the merge. Enclosing folder names become flat tags,
+imports create active bookmarks, and invalid or duplicate URLs are skipped.
+HTML is not a full-fidelity backup: use JSON to preserve notes, tags, dates and
+archive state. HTML imports are limited to 20 MiB/10,000 entries.
+
 When upgrading an existing installation, restart Stash and reload open tabs.
 The database automatically gains immutable bookmark identities so stale tabs
 cannot modify a replacement bookmark after deletion. See the
@@ -28,9 +36,10 @@ requirements.
 
 Use **Node.js 22.16.0**, the exact supported runtime. Stash uses Node's built-in
 SQLite API, which is experimental in this version; the startup command enables
-it with `--experimental-sqlite`. There are no third-party runtime dependencies
-and no frontend build step. Playwright is installed as a development-only
-dependency for browser tests.
+it with `--experimental-sqlite`. Stash uses the maintained `parse5` runtime
+dependency for standards-compliant browser-bookmark HTML parsing; there is no
+frontend build step. Playwright is installed as a development-only dependency
+for browser tests.
 
 Clone this repository, open a terminal in the source checkout, and run:
 
@@ -62,12 +71,6 @@ By default, the SQLite database lives outside the checkout:
 Set `STASH_DATA_DIR` to choose the directory containing `stash.sqlite`, or set
 `STASH_DB_PATH` to choose the complete database file path. `STASH_DB_PATH` takes
 precedence. Stash displays the database location at startup and in the page.
-
-## Planned roadmap
-
-The following features are planned, **not yet implemented**:
-
-- Browser-bookmark HTML import/export for exchanging links and titles.
 
 ## Detailed documentation
 

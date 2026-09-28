@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const { performance } = require('node:perf_hooks');
 const { DatabaseSync } = require('node:sqlite');
 
 test('migrates legacy identity and rejects stale mutations after delete/recreate and restart', async (t) => {
@@ -193,6 +194,128 @@ function backupRequest(port, action, backup, token, extra = {}) {
     chunked: extra.chunked,
   });
 }
+
+function htmlRequest(port, action, html, token, extra = {}) {
+  return request(port, `/api/backup/html/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/html; charset=utf-8', ...(token ? { 'X-Stash-Preview': token } : {}), ...extra.headers },
+    body: html,
+    chunked: extra.chunked,
+  });
+}
+
+const browserFixture = fs.readFileSync(path.join(__dirname, 'fixtures', 'browser-bookmarks.html'), 'utf8');
+
+test('browser HTML export is portable and HTML merge previews folders, dates, invalid entries and duplicates', async (t) => {
+  const databases = [temporaryDatabase(), temporaryDatabase()];
+  const [source, target] = await Promise.all(databases.map((db) => serverFor(db.path)));
+  t.after(async () => {
+    await Promise.all([close(source.server), close(target.server)]);
+    for (const db of databases) fs.rmSync(db.directory, { recursive: true, force: true });
+  });
+  const saved = (await saveRequest(source.port, 'https://example.com/exported', '<img src=x onerror=alert(1)>')).json.bookmark;
+  await change(source.port, saved.id, { identity: saved.identity, archived: true });
+  const exported = await request(source.port, '/api/backup/html?view=active&q=missing');
+  assert.equal(exported.status, 200);
+  assert.match(exported.headers['content-type'], /^text\/html; charset=utf-8$/);
+  assert.match(exported.headers['content-disposition'], /stash-bookmarks\.html/);
+  assert.match(exported.text, /HREF="https:\/\/example\.com\/exported"/);
+  assert.match(exported.text, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(exported.text, /<img src=x/);
+
+  const existing = (await saveRequest(target.port, 'https://example.com/existing', 'Keep existing')).json.bookmark;
+  const archivedExisting = (await change(target.port, existing.id, { identity: existing.identity, archived: true })).json.bookmark;
+  assert.equal((await htmlRequest(target.port, 'preview', browserFixture, undefined,
+    { headers: { 'Content-Type': 'text/htmlfoo' } })).status, 415);
+  const preview = await htmlRequest(target.port, 'preview', browserFixture);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.json.add, 3);
+  assert.equal(preview.json.skip, 4);
+  assert.match(preview.json.entries.find((entry) => entry.url === 'javascript:alert(1)').reason, /HTTP\(S\)/);
+  assert.equal(preview.json.entries.find((entry) => entry.url === 'https://example.com/one').reason, null);
+  assert.match(preview.json.entries.find((entry) => entry.title === 'Duplicate').reason, /in this file/);
+  assert.match(preview.json.entries.find((entry) => entry.title === 'Existing incoming').reason, /already in collection/);
+  assert.deepEqual((await request(target.port, '/api/bookmarks?view=all')).json.bookmarks, [archivedExisting]);
+
+  const cancelled = await request(target.port, '/api/bookmarks?view=all');
+  assert.equal(cancelled.json.bookmarks.length, 1, 'closing the preview performs no write');
+  const confirmed = await htmlRequest(target.port, 'confirm', browserFixture, preview.json.token);
+  assert.equal(confirmed.status, 200);
+  assert.equal(confirmed.json.add, 3);
+  const imported = (await request(target.port, '/api/bookmarks?view=all')).json.bookmarks.sort((a, b) => a.url.localeCompare(b.url));
+  assert.deepEqual(imported.find((bookmark) => bookmark.url === archivedExisting.url), archivedExisting);
+  const one = imported.find((bookmark) => bookmark.url === 'https://example.com/one');
+  const nested = imported.find((bookmark) => bookmark.url === 'https://example.com/nested');
+  const noTitle = imported.find((bookmark) => bookmark.url === 'https://example.com/no-title');
+  assert.equal(one.title, 'One');
+  assert.equal(one.createdAt, '2021-01-01T00:00:00.000Z');
+  assert.deepEqual(one.tags, ['reading & research']);
+  assert.equal(nested.title, 'alert(1)Nested');
+  assert.deepEqual(nested.tags, ['reading & research', 'nested <folder>']);
+  assert.equal(noTitle.title, 'https://example.com/no-title');
+  assert.equal(noTitle.createdAt, noTitle.updatedAt, 'invalid browser dates do not invent a stale update time');
+});
+
+test('browser HTML limits and confirmed failures leave the collection unchanged', async (t) => {
+  const database = temporaryDatabase();
+  let running = await serverFor(database.path);
+  t.after(async () => { await close(running.server); fs.rmSync(database.directory, { recursive: true, force: true }); });
+  const oversized = '<DL><p>' + ' '.repeat(20 * 1024 * 1024 + 1);
+  for (const action of ['preview', 'confirm']) {
+    assert.equal((await htmlRequest(running.port, action, oversized, undefined, { chunked: action === 'confirm' })).status, 413);
+  }
+  const tooMany = `<DL><p>${Array.from({ length: 10001 }, (_, i) => `<DT><A HREF="https://example.com/${i}">${i}</A>`).join('')}</DL>`;
+  assert.equal((await htmlRequest(running.port, 'preview', tooMany)).status, 422);
+  assert.deepEqual((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks, []);
+
+  const preview = await htmlRequest(running.port, 'preview', browserFixture);
+  running.server.stash.db.exec(`CREATE TRIGGER fail_html BEFORE INSERT ON bookmarks
+    WHEN NEW.url = 'https://example.com/nested' BEGIN SELECT RAISE(ABORT, 'injected failure'); END`);
+  const failed = await htmlRequest(running.port, 'confirm', browserFixture, preview.json.token);
+  assert.equal(failed.status, 500);
+  assert.deepEqual((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks, []);
+  running.server.stash.db.exec('DROP TRIGGER fail_html');
+  assert.equal((await htmlRequest(running.port, 'confirm', browserFixture, preview.json.token)).json.add, 4);
+});
+
+test('browser HTML tokenizer ignores raw text, preserves unquoted URL slashes and decodes entities', async (t) => {
+  const database = temporaryDatabase();
+  const running = await serverFor(database.path);
+  t.after(async () => { await close(running.server); fs.rmSync(database.directory, { recursive: true, force: true }); });
+  const html = `<script>< /script><A HREF="https://example.com/false-script">False script</A></script>
+    <style><A HREF="https://example.com/false-style">False style</A></style>
+    <title><A HREF="https://example.com/false-title">False title</A></title>
+    <textarea><A HREF="https://example.com/false-textarea">False textarea</A></textarea>
+    < A HREF="https://example.com/false-space">False space</A>
+    <DL><p><DT><A HREF=https://example.com/unquoted/path/>Unquoted</A>
+      <DT><A HREF="https://example.com/?x=1&amp=2">Caf&eacute; &NotEqualTilde; &rarr; &notin; &#x1F4DA; &amp=2 &amp; &notin &ampx &ltx</A></DL>
+    <plaintext><A HREF="https://example.com/false-plaintext">False plaintext</A>`;
+  const preview = await htmlRequest(running.port, 'preview', html);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.json.add, 2);
+  assert.equal(preview.json.entries.length, 2);
+  assert.equal(preview.json.entries[0].url, 'https://example.com/unquoted/path/');
+  assert.equal(preview.json.entries[0].title, 'Unquoted');
+  assert.equal(preview.json.entries[1].url, 'https://example.com/?x=1&amp=2');
+  assert.equal(preview.json.entries[1].title, 'Café ≂̸ → ∉ 📚 &=2 & ¬in &x <x');
+  const confirmed = await htmlRequest(running.port, 'confirm', html, preview.json.token);
+  assert.equal(confirmed.status, 200);
+  assert.deepEqual((await request(running.port, '/api/bookmarks?view=all')).json.bookmarks.map((bookmark) => bookmark.url).sort(), ['https://example.com/?x=1&amp=2', 'https://example.com/unquoted/path/']);
+});
+
+test('pathological unterminated HTML completes without blocking a subsequent request', async (t) => {
+  const database = temporaryDatabase();
+  const running = await serverFor(database.path);
+  t.after(async () => { await close(running.server); fs.rmSync(database.directory, { recursive: true, force: true }); });
+  const malformed = '<'.repeat(20 * 1024 * 1024);
+  const malformedRequest = htmlRequest(running.port, 'preview', malformed);
+  const started = performance.now();
+  const followup = await request(running.port, '/api/bookmarks');
+  const elapsed = performance.now() - started;
+  assert.equal(followup.status, 200);
+  assert.ok(elapsed < 2000, `subsequent request took ${elapsed.toFixed(1)}ms`);
+  assert.equal((await malformedRequest).status, 200);
+});
 
 test('JSON export ignores filters and preview/confirmed merge round-trips bookmark content', async (t) => {
   const databases = [temporaryDatabase(), temporaryDatabase()];
