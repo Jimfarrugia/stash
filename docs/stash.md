@@ -10,6 +10,10 @@ Stash is tested with **Node.js 22.16.0**. Node's built-in SQLite API is
 experimental in this runtime, so startup and the Node tests use
 `--experimental-sqlite`. There is no frontend build step.
 
+Browser-bookmark HTML imports use the maintained `parse5` HTML5 parser. It only
+parses the uploaded text; Stash does not load resources or execute imported
+markup.
+
 ```sh
 npm install
 npm start

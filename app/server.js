@@ -4,7 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { DatabaseSync } = require('node:sqlite');
 const { randomUUID, randomBytes, createHmac, timingSafeEqual } = require('node:crypto');
-const { HTML_ENTITIES, HTML_ENTITY_LEGACY_NAMES } = require('./html-entities');
+const parse5Ready = import('parse5').then(({ parseFragment }) => parseFragment);
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -211,155 +211,45 @@ function validateBackup(backup) {
   });
 }
 
-function findHtmlTagEnd(input, start) {
-  let quote;
-  for (let index = start + 1; index < input.length; index++) {
-    const character = input[index];
-    if (quote) {
-      if (character === quote) quote = undefined;
-    } else if (character === '"' || character === "'") {
-      quote = character;
-    } else if (character === '>') {
-      return index;
-    }
-  }
-  return -1;
+function htmlText(node) {
+  return (node.childNodes || []).map((child) => child.nodeName === '#text' ? child.value : htmlText(child)).join('');
 }
 
-const NUMERIC_REFERENCE_REPLACEMENTS = {
-  0x80: 0x20ac, 0x82: 0x201a, 0x83: 0x192, 0x84: 0x201e, 0x85: 0x2026, 0x86: 0x2020,
-  0x87: 0x2021, 0x88: 0x2c6, 0x89: 0x2030, 0x8a: 0x160, 0x8b: 0x2039, 0x8c: 0x152,
-  0x8e: 0x17d, 0x91: 0x2018, 0x92: 0x2019, 0x93: 0x201c, 0x94: 0x201d, 0x95: 0x2022,
-  0x96: 0x2013, 0x97: 0x2014, 0x98: 0x2dc, 0x99: 0x2122, 0x9a: 0x161, 0x9b: 0x203a,
-  0x9c: 0x153, 0x9e: 0x17e, 0x9f: 0x178,
-};
-
-function decodeNumericReference(reference) {
-  const hexadecimal = /^#x/iu.test(reference);
-  const codePoint = Number.parseInt(reference.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
-  if (!Number.isFinite(codePoint) || codePoint === 0 || codePoint > 0x10ffff ||
-      (codePoint >= 0xd800 && codePoint <= 0xdfff)) return '\ufffd';
-  return String.fromCodePoint(NUMERIC_REFERENCE_REPLACEMENTS[codePoint] || codePoint);
+function htmlAttribute(node, name) {
+  return node.attrs?.find((attribute) => attribute.name === name)?.value;
 }
 
-function decodeHtmlEntities(value, inAttribute = false) {
-  const references = /&(?:#(?:[xX][\da-fA-F]+|\d+)|[A-Za-z][A-Za-z\d]+);?/gu;
-  return value.replace(references, (entity, offset, source) => {
-    const reference = entity.slice(1, entity.endsWith(';') ? -1 : undefined);
-    const semicolon = entity.endsWith(';');
-    if (reference.startsWith('#')) return decodeNumericReference(reference);
-    if (!Object.hasOwn(HTML_ENTITIES, reference) || (!semicolon && !HTML_ENTITY_LEGACY_NAMES.has(reference))) return entity;
-    if (inAttribute && !semicolon && /[A-Za-z0-9=]/u.test(source[offset + entity.length] || '')) return entity;
-    return HTML_ENTITIES[reference];
-  });
-}
-
-function parseHtmlAttributes(source) {
-  const attributes = {};
-  const pattern = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/gu;
-  for (const match of source.matchAll(pattern)) {
-    const name = match[1].toLowerCase();
-    if (!Object.hasOwn(attributes, name)) attributes[name] = decodeHtmlEntities(match[2] ?? match[3] ?? match[4] ?? '', true);
-  }
-  return attributes;
-}
-
-function parseBrowserBookmarkHtml(html) {
+async function parseBrowserBookmarkHtml(html) {
+  const parseFragment = await parse5Ready;
+  const root = parseFragment(html);
   const rawEntries = [];
-  const folders = [];
-  const dlFolders = [];
-  let pendingFolder;
-  let heading;
-  let anchor;
-  let rawText;
-  let position = 0;
 
-  const appendText = (text) => {
-    if (anchor) anchor.text += decodeHtmlEntities(text);
-    else if (heading) heading.text += decodeHtmlEntities(text);
-  };
-
-  const finishAnchor = () => {
-    if (!anchor) return;
-    rawEntries.push({ href: anchor.attributes.href, add_date: anchor.attributes.add_date, title: anchor.text, folders: anchor.folders });
-    anchor = undefined;
-  };
-
-  while (position < html.length) {
-    if (rawText) {
-      if (rawText === 'plaintext') {
-        appendText(html.slice(position));
-        position = html.length;
-        break;
+  function visit(nodes, folders) {
+    let pendingFolder;
+    for (const node of nodes || []) {
+      if (node.nodeName === 'h3') {
+        pendingFolder = htmlText(node).trim();
+        continue;
       }
-      const closingTag = new RegExp(`</\\s*${rawText}\\s*>`, 'giu');
-      closingTag.lastIndex = position;
-      const match = closingTag.exec(html);
-      if (!match) {
-        appendText(html.slice(position));
-        position = html.length;
-        break;
+      if (node.nodeName === 'dl') {
+        visit(node.childNodes, pendingFolder ? [...folders, pendingFolder] : folders);
+        pendingFolder = undefined;
+        continue;
       }
-      appendText(html.slice(position, match.index));
-      position = match.index;
-      rawText = undefined;
-      continue;
-    }
-    if (html[position] !== '<') {
-      const next = html.indexOf('<', position);
-      const text = html.slice(position, next < 0 ? html.length : next);
-      appendText(text);
-      position = next < 0 ? html.length : next;
-      continue;
-    }
-    if (html.startsWith('<!--', position)) {
-      const end = html.indexOf('-->', position + 4);
-      position = end < 0 ? html.length : end + 3;
-      continue;
-    }
-    const end = findHtmlTagEnd(html, position);
-    if (end < 0) {
-      appendText(html.slice(position));
-      position = html.length;
-      break;
-    }
-    const source = html.slice(position, end + 1);
-    const match = source.match(/^<\s*(\/?)\s*([a-z][\w:-]*)([\s\S]*?)>$/iu);
-    position = end + 1;
-    if (!match) continue;
-    const closing = Boolean(match[1]);
-    const name = match[2].toLowerCase();
-
-    if (!closing && ['script', 'style', 'title', 'textarea', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'plaintext'].includes(name)) {
-      rawText = name;
-      continue;
-    }
-    if (anchor && ((closing && ['a', 'dt', 'dl', 'h3'].includes(name)) || (!closing && name === 'a'))) finishAnchor();
-    if (anchor) {
-      if (closing && name === 'a') continue;
-      continue;
-    }
-    if (heading) {
-      if (closing && name === 'h3') {
-        pendingFolder = heading.text.trim();
-        heading = undefined;
+      if (node.nodeName === 'a') {
+        rawEntries.push({
+          href: htmlAttribute(node, 'href'),
+          add_date: htmlAttribute(node, 'add_date'),
+          title: htmlText(node),
+          folders: [...folders],
+        });
+        continue;
       }
-      continue;
-    }
-    if (!closing && name === 'h3') {
-      heading = { text: '' };
-    } else if (!closing && name === 'dl') {
-      const hasFolder = pendingFolder !== undefined;
-      if (hasFolder && pendingFolder) folders.push(pendingFolder);
-      dlFolders.push(hasFolder && Boolean(pendingFolder));
-      pendingFolder = undefined;
-    } else if (closing && name === 'dl') {
-      if (dlFolders.pop()) folders.pop();
-    } else if (!closing && name === 'a') {
-      anchor = { attributes: parseHtmlAttributes(match[3]), text: '', folders: [...folders] };
+      visit(node.childNodes, folders);
     }
   }
-  finishAnchor();
+
+  visit(root.childNodes, []);
   return rawEntries;
 }
 
@@ -371,8 +261,8 @@ function htmlCreationDate(value) {
   return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
 }
 
-function htmlImportCandidates(html) {
-  const rawEntries = parseBrowserBookmarkHtml(html);
+async function htmlImportCandidates(html) {
+  const rawEntries = await parseBrowserBookmarkHtml(html);
   if (rawEntries.length > MAX_IMPORT_ENTRIES) throw new Error('HTML import exceeds the 10,000-entry limit.');
   const now = new Date().toISOString();
   return rawEntries.map((entry) => {
@@ -570,7 +460,7 @@ function createServer(options = {}) {
           throw Object.assign(new Error('HTML import exceeds the 20 MiB limit.'), { status: 413 });
         }
         const body = await readBody(request, MAX_BACKUP_BYTES, true);
-        const candidates = htmlImportCandidates(body);
+        const candidates = await htmlImportCandidates(body);
         const token = previewToken(body);
         if (pathname.endsWith('/preview')) {
           json(response, 200, { ...planMerge(db, candidates), token });

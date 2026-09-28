@@ -36,9 +36,10 @@ requirements.
 
 Use **Node.js 22.16.0**, the exact supported runtime. Stash uses Node's built-in
 SQLite API, which is experimental in this version; the startup command enables
-it with `--experimental-sqlite`. There are no third-party runtime dependencies
-and no frontend build step. Playwright is installed as a development-only
-dependency for browser tests.
+it with `--experimental-sqlite`. Stash uses the maintained `parse5` runtime
+dependency for standards-compliant browser-bookmark HTML parsing; there is no
+frontend build step. Playwright is installed as a development-only dependency
+for browser tests.
 
 Clone this repository, open a terminal in the source checkout, and run:
 
